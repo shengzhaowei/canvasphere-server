@@ -14,22 +14,27 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from app import auth, db, permissions, store  # noqa: E402
+from app import auth, db, permissions, realtime, store  # noqa: E402
 from app.main import app  # noqa: E402
 
 _P0_STRICT_MODULES = {
     "test_auth_and_profile.py",
     "test_projects_rbac_canvases.py",
     "test_storage_and_persistence.py",
+    "test_canvas_objects_leases_sse.py",
+    "test_billing_wallet_redeem.py",
+    "test_multimodal_generations.py",
 }
 
 
 @pytest.fixture(autouse=True)
 def _p0_test_isolation(request, monkeypatch, tmp_path):
-    """Isolate storage directory, email sink, and legacy auth header flag."""
+    """Isolate storage directory, email sink, realtime state, and legacy auth header flag."""
     monkeypatch.setenv("LOCAL_STORAGE_DIR", str(tmp_path / "storage"))
     monkeypatch.setenv("STORAGE_BACKEND", "local")
     monkeypatch.setenv("JWT_SECRET", "test-secret-key-for-canvasphere-p0-unit-tests-32b")
+    monkeypatch.delenv("MODEL_GATEWAY_BASE_URL", raising=False)
+    monkeypatch.delenv("MODEL_GATEWAY_API_KEY", raising=False)
     filename = Path(str(request.fspath)).name
     if filename in _P0_STRICT_MODULES:
         monkeypatch.setenv("AUTH_ALLOW_LEGACY_ROLE_HEADER", "false")
@@ -37,9 +42,11 @@ def _p0_test_isolation(request, monkeypatch, tmp_path):
         monkeypatch.setenv("AUTH_ALLOW_LEGACY_ROLE_HEADER", "true")
 
     auth.clear_email_test_sink()
+    realtime.reset_realtime_state()
     db.init_db()
     yield
     auth.clear_email_test_sink()
+    realtime.reset_realtime_state()
 
 
 @pytest.fixture()
@@ -49,12 +56,16 @@ def strict_client(monkeypatch, tmp_path):
     monkeypatch.setenv("LOCAL_STORAGE_DIR", str(tmp_path / "storage"))
     monkeypatch.setenv("STORAGE_BACKEND", "local")
     monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("MODEL_GATEWAY_BASE_URL", raising=False)
+    monkeypatch.delenv("MODEL_GATEWAY_API_KEY", raising=False)
     db.reset_engine()
     store.reset_store()
     permissions.reset_approval_state()
     auth.clear_email_test_sink()
+    realtime.reset_realtime_state()
     client = TestClient(app)
     yield client
     store.reset_store()
     permissions.reset_approval_state()
     auth.clear_email_test_sink()
+    realtime.reset_realtime_state()

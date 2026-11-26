@@ -1,12 +1,13 @@
-"""Core SQLAlchemy 2.0 ORM models for Phase P0.
+"""Core SQLAlchemy 2.0 ORM models for Phase P0 + P1.
 
 Prefixed IDs mirror Pecan Studio conventions (usr_, prj_, wsp_, can_, obj_,
-inv_, tsk_, sto_) while preserving compatibility with legacy Canvasphere IDs.
+inv_, tsk_, sto_, res_, rc_, usg_, chg_, sbx_, rdc_, gen_).
 """
 from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any, Optional
 
 from sqlalchemy import (
@@ -17,6 +18,7 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     JSON,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -167,7 +169,14 @@ class CanvasObject(Base):
     content_json: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
     asset_json: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
     style_json: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    # P1 connector & media search extensions
+    from_object_id: Mapped[Optional[str]] = mapped_column(String(40), nullable=True, index=True)
+    from_anchor: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    to_object_id: Mapped[Optional[str]] = mapped_column(String(40), nullable=True, index=True)
+    to_anchor: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    media_type: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, index=True)
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
@@ -224,3 +233,168 @@ class StorageObject(Base):
     status: Mapped[str] = mapped_column(String(24), default="pending", nullable=False, index=True)  # pending | uploaded | deleted
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+# --- Phase P1: Billing, Credits, RateCards & Redeem Codes ----------------
+class CreditWallet(Base):
+    __tablename__ = "credit_wallets"
+
+    user_id: Mapped[str] = mapped_column(String(40), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    bonus_credits: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=Decimal("300.0000"), nullable=False)
+    cash_credits: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=Decimal("0.0000"), nullable=False)
+    reserved_bonus_credits: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=Decimal("0.0000"), nullable=False)
+    reserved_cash_credits: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=Decimal("0.0000"), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class CreditReservation(Base):
+    __tablename__ = "credit_reservations"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_prefixed_id("res"))
+    user_id: Mapped[str] = mapped_column(String(40), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_type: Mapped[str] = mapped_column(String(32), nullable=False)  # generation | llm | sandbox | service
+    source_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    estimated_credits: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    reserved_bonus: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=Decimal("0.0000"), nullable=False)
+    reserved_cash: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=Decimal("0.0000"), nullable=False)
+    settled_bonus: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=Decimal("0.0000"), nullable=False)
+    settled_cash: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=Decimal("0.0000"), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), default="reserved", nullable=False, index=True)  # reserved | settled | released
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    settled_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class RateCard(Base):
+    __tablename__ = "rate_cards"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_prefixed_id("rc"))
+    model_key: Mapped[str] = mapped_column(String(128), unique=True, nullable=False, index=True)
+    display_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    modality: Mapped[str] = mapped_column(String(24), nullable=False, index=True)  # text | image | video | tts | asr | music
+    provider_family: Mapped[str] = mapped_column(String(64), nullable=False)
+    protocol_profile: Mapped[str] = mapped_column(String(64), nullable=False)
+    billing_mode: Mapped[str] = mapped_column(String(32), nullable=False)  # per_million_tokens | per_image | per_second | per_call | per_operation
+    unit_price_credits: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    output_price_credits: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 4), nullable=True)
+    pricing_meta_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    capabilities_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
+class BillingUsageRecord(Base):
+    __tablename__ = "billing_usage_records"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_prefixed_id("usg"))
+    user_id: Mapped[str] = mapped_column(String(40), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    project_id: Mapped[Optional[str]] = mapped_column(String(40), ForeignKey("projects.id", ondelete="SET NULL"), nullable=True, index=True)
+    job_id: Mapped[Optional[str]] = mapped_column(String(40), nullable=True, index=True)
+    modality: Mapped[str] = mapped_column(String(24), nullable=False, index=True)
+    model_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    payment_source: Mapped[str] = mapped_column(String(32), default="platform_credits", nullable=False, index=True)  # platform_credits | byok
+    quantity_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    credits_charged: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=Decimal("0.0000"), nullable=False)
+    bonus_charged: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=Decimal("0.0000"), nullable=False)
+    cash_charged: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=Decimal("0.0000"), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), default="settled", nullable=False)  # settled | mock_free | refunded
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False, index=True)
+
+
+class BillingChargeRecord(Base):
+    __tablename__ = "billing_charge_records"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_prefixed_id("chg"))
+    user_id: Mapped[str] = mapped_column(String(40), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    project_id: Mapped[Optional[str]] = mapped_column(String(40), ForeignKey("projects.id", ondelete="SET NULL"), nullable=True, index=True)
+    charge_type: Mapped[str] = mapped_column(String(32), nullable=False)  # voice_first_use | storage | service
+    description: Mapped[str] = mapped_column(String(255), nullable=False)
+    credits_charged: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=Decimal("0.0000"), nullable=False)
+    bonus_charged: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=Decimal("0.0000"), nullable=False)
+    cash_charged: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=Decimal("0.0000"), nullable=False)
+    meta_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False, index=True)
+
+
+class BillingSandboxRecord(Base):
+    __tablename__ = "billing_sandbox_records"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_prefixed_id("sbx"))
+    user_id: Mapped[str] = mapped_column(String(40), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    project_id: Mapped[Optional[str]] = mapped_column(String(40), ForeignKey("projects.id", ondelete="SET NULL"), nullable=True, index=True)
+    spec_name: Mapped[str] = mapped_column(String(32), nullable=False)
+    duration_seconds: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    credits_charged: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=Decimal("0.0000"), nullable=False)
+    failure_free: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), default="settled", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False, index=True)
+
+
+class RedeemCode(Base):
+    __tablename__ = "redeem_codes"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_prefixed_id("rdc"))
+    code: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    credit_pool: Mapped[str] = mapped_column(String(16), default="bonus", nullable=False)  # bonus | cash
+    credits_amount: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    max_uses: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    used_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by: Mapped[Optional[str]] = mapped_column(String(40), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class RedeemCodeRedemption(Base):
+    __tablename__ = "redeem_code_redemptions"
+    __table_args__ = (
+        UniqueConstraint("redeem_code_id", "user_id", name="uq_redeem_code_user"),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_prefixed_id("rdr"))
+    redeem_code_id: Mapped[str] = mapped_column(String(40), ForeignKey("redeem_codes.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(String(40), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    credits_credited: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    credit_pool: Mapped[str] = mapped_column(String(16), nullable=False)
+    redeemed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class UserVoiceActivation(Base):
+    __tablename__ = "user_voice_activations"
+    __table_args__ = (
+        UniqueConstraint("user_id", "voice_id", name="uq_user_voice_activation"),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_prefixed_id("vac"))
+    user_id: Mapped[str] = mapped_column(String(40), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    voice_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    credits_charged: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=Decimal("0.0000"), nullable=False)
+    activated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class GenerationJob(Base):
+    __tablename__ = "generation_jobs"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_prefixed_id("gen"))
+    request_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    user_id: Mapped[Optional[str]] = mapped_column(String(40), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    project_id: Mapped[str] = mapped_column(String(40), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    canvas_id: Mapped[str] = mapped_column(String(40), ForeignKey("canvases.id", ondelete="CASCADE"), nullable=False, index=True)
+    target_object_id: Mapped[Optional[str]] = mapped_column(String(40), ForeignKey("canvas_objects.id", ondelete="SET NULL"), nullable=True)
+    parent_job_id: Mapped[Optional[str]] = mapped_column(String(40), nullable=True, index=True)
+    modality: Mapped[str] = mapped_column(String(24), nullable=False, index=True)  # image | video | audio | music
+    model_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    protocol_profile: Mapped[str] = mapped_column(String(64), nullable=False)
+    mode: Mapped[str] = mapped_column(String(64), nullable=False)
+    prompt: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    params_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    input_object_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), default="queued", nullable=False, index=True)  # queued | running | succeeded | failed
+    progress: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    reservation_id: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    payment_source: Mapped[str] = mapped_column(String(32), default="platform_credits", nullable=False)
+    mock: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    output_json: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)

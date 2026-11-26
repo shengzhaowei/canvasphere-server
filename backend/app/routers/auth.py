@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import auth
+from app import auth, billing
 from app.db import get_db
 from app.models import OAuthBinding, User, new_prefixed_id, utcnow
 
@@ -86,6 +86,7 @@ def register(
     )
     db.add(user)
     db.flush()
+    billing.get_or_create_wallet(db, user.id)
     tokens = auth.issue_token_pair(db, user, request=request, response=response)
     return {**tokens, "user": auth.serialize_user_profile(user)}
 
@@ -235,6 +236,7 @@ async def oauth_callback(
             )
             db.add(user)
             db.flush()
+            billing.get_or_create_wallet(db, user.id)
         db.add(OAuthBinding(
             id=new_prefixed_id("oab"),
             user_id=user.id,

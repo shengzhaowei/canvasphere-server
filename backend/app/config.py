@@ -90,6 +90,14 @@ class Settings:
     llm_price_input: float
     llm_price_output: float
 
+    # P1: Realtime collaboration, Billing & Multimodal Model Gateway
+    object_lease_ttl_seconds: int
+    presence_ttl_seconds: int
+    default_signup_bonus_credits: float
+    voice_first_use_credits: float
+    model_gateway_base_url: str
+    model_gateway_api_key: str
+
     @property
     def effective_storage_backend(self) -> str:
         mode = self.storage_backend.strip().lower()
@@ -146,4 +154,10 @@ def get_settings() -> Settings:
         cover_video_max_seconds=_float_env("COVER_VIDEO_MAX_SECONDS", 30.0),
         llm_price_input=_float_env("LLM_PRICE_INPUT", 30.0),
         llm_price_output=_float_env("LLM_PRICE_OUTPUT", 150.0),
+        object_lease_ttl_seconds=_int_env("OBJECT_LEASE_TTL_SECONDS", 60),
+        presence_ttl_seconds=_int_env("PRESENCE_TTL_SECONDS", 30),
+        default_signup_bonus_credits=_float_env("DEFAULT_SIGNUP_BONUS_CREDITS", 300.0),
+        voice_first_use_credits=_float_env("VOICE_FIRST_USE_CREDITS", 1000.0),
+        model_gateway_base_url=os.environ.get("MODEL_GATEWAY_BASE_URL", "").strip().rstrip("/"),
+        model_gateway_api_key=os.environ.get("MODEL_GATEWAY_API_KEY", "").strip(),
     )

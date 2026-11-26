@@ -407,7 +407,10 @@ def list_elements(project_id: str, canvas_id: Optional[str] = None) -> list[dict
         proj = db.get(Project, project_id)
         if proj is None or proj.status == "deleted":
             raise KeyError(f"project not found: {project_id}")
-        stmt = select(CanvasObject).where(CanvasObject.project_id == project_id)
+        stmt = select(CanvasObject).where(
+            CanvasObject.project_id == project_id,
+            CanvasObject.deleted_at.is_(None),
+        )
         if canvas_id:
             _resolve_canvas_id(db, project_id, canvas_id)
             stmt = stmt.where(CanvasObject.canvas_id == canvas_id)
@@ -418,7 +421,7 @@ def list_elements(project_id: str, canvas_id: Optional[str] = None) -> list[dict
 def get_element(project_id: str, node_id: str) -> Optional[dict[str, Any]]:
     with session_scope() as db:
         obj = db.get(CanvasObject, node_id)
-        if obj is None or obj.project_id != project_id:
+        if obj is None or obj.project_id != project_id or obj.deleted_at is not None:
             return None
         return _element_dict(obj)
 

@@ -30,19 +30,25 @@ logger = logging.getLogger(__name__)
 from app import agents, auth, store  # noqa: E402
 from app.checkpoint import get_checkpointer  # noqa: E402
 from app.config import get_settings  # noqa: E402
-from app.db import db_kind, get_db, init_db  # noqa: E402
+from app.db import db_kind, get_db, init_db, session_scope  # noqa: E402
 from app.permissions import (  # noqa: E402
     ALL_TOOLS, assert_permission, check_permission,
     get_policy, grant_tool, require_approval,
     set_tool_tier, tier_of,
 )
+from app.rate_cards_seed import ensure_rate_cards_seeded  # noqa: E402
 from app.routers.auth import router as auth_router  # noqa: E402
+from app.routers.billing import router as billing_router  # noqa: E402
+from app.routers.canvas import router as canvas_router  # noqa: E402
+from app.routers.generations import router as generations_router  # noqa: E402
 from app.routers.profile import router as profile_router  # noqa: E402
 from app.routers.projects import router as projects_router  # noqa: E402
 from app.routers.storage import router as storage_router  # noqa: E402
 from app.skills import is_skill_enabled, list_skills, load_skill, set_skill_enabled  # noqa: E402
 
 init_db()
+with session_scope() as _seed_db:
+    ensure_rate_cards_seeded(_seed_db)
 
 app = FastAPI(title="canvasphere backend")
 _settings = get_settings()
@@ -57,6 +63,9 @@ app.include_router(auth_router)
 app.include_router(profile_router)
 app.include_router(storage_router)
 app.include_router(projects_router)
+app.include_router(canvas_router)
+app.include_router(billing_router)
+app.include_router(generations_router)
 
 session_host = None  # created lazily to avoid import-time side effects
 
