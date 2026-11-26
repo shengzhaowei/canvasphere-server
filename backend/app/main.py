@@ -37,13 +37,16 @@ from app.permissions import (  # noqa: E402
     set_tool_tier, tier_of,
 )
 from app.rate_cards_seed import ensure_rate_cards_seeded  # noqa: E402
+from app.routers.asset_tools import router as asset_tools_router  # noqa: E402
 from app.routers.auth import router as auth_router  # noqa: E402
 from app.routers.billing import router as billing_router  # noqa: E402
 from app.routers.canvas import router as canvas_router  # noqa: E402
 from app.routers.generations import router as generations_router  # noqa: E402
 from app.routers.profile import router as profile_router  # noqa: E402
 from app.routers.projects import router as projects_router  # noqa: E402
+from app.routers.sandbox import router as sandbox_router  # noqa: E402
 from app.routers.storage import router as storage_router  # noqa: E402
+from app.routers.studio import router as studio_router  # noqa: E402
 from app.skills import is_skill_enabled, list_skills, load_skill, set_skill_enabled  # noqa: E402
 
 init_db()
@@ -66,6 +69,9 @@ app.include_router(projects_router)
 app.include_router(canvas_router)
 app.include_router(billing_router)
 app.include_router(generations_router)
+app.include_router(studio_router)
+app.include_router(sandbox_router)
+app.include_router(asset_tools_router)
 
 session_host = None  # created lazily to avoid import-time side effects
 

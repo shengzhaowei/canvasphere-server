@@ -398,3 +398,107 @@ class GenerationJob(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+# --- Phase P2: Multi-Agent Sessions, TaskRun Leases, Sandbox & Asset Tools
+class AgentSession(Base):
+    __tablename__ = "agent_sessions"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_prefixed_id("ses"))
+    project_id: Mapped[str] = mapped_column(String(40), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    canvas_id: Mapped[Optional[str]] = mapped_column(String(40), ForeignKey("canvases.id", ondelete="SET NULL"), nullable=True)
+    user_id: Mapped[Optional[str]] = mapped_column(String(40), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    title: Mapped[str] = mapped_column(String(128), default="Pecan Studio 会话", nullable=False)
+    context_summary: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    summary_storage_id: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    token_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    compressed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class AgentMessage(Base):
+    __tablename__ = "agent_messages"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_prefixed_id("msg"))
+    session_id: Mapped[str] = mapped_column(String(40), ForeignKey("agent_sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String(24), nullable=False)  # user | assistant | tool | system
+    agent_name: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)  # pecan | orange | xiaoa | blueberry | yueyue
+    content: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    skills_json: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    context_object_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    tool_calls_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    token_estimate: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    compressed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class TaskRun(Base):
+    __tablename__ = "task_runs"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_prefixed_id("run"))
+    request_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    project_id: Mapped[str] = mapped_column(String(40), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    canvas_id: Mapped[Optional[str]] = mapped_column(String(40), ForeignKey("canvases.id", ondelete="SET NULL"), nullable=True)
+    session_id: Mapped[Optional[str]] = mapped_column(String(40), ForeignKey("agent_sessions.id", ondelete="SET NULL"), nullable=True, index=True)
+    user_id: Mapped[Optional[str]] = mapped_column(String(40), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    primary_agent: Mapped[str] = mapped_column(String(32), default="pecan", nullable=False)
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False, index=True)
+    generation_fence: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    lease_owner: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    lease_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    frozen_tree_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    pending_tool_json: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    recovery_bundle_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    result_json: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ProjectSandboxConfig(Base):
+    __tablename__ = "project_sandbox_configs"
+
+    project_id: Mapped[str] = mapped_column(String(40), ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    spec_name: Mapped[str] = mapped_column(String(32), default="2核4G", nullable=False)
+    spend_cap_credits: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=Decimal("500.0000"), nullable=False)
+    idle_keep_minutes: Mapped[int] = mapped_column(Integer, default=2, nullable=False)
+    spent_credits: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=Decimal("0.0000"), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class SandboxSession(Base):
+    __tablename__ = "sandbox_sessions"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_prefixed_id("sbs"))
+    project_id: Mapped[str] = mapped_column(String(40), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id: Mapped[Optional[str]] = mapped_column(String(40), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    spec_name: Mapped[str] = mapped_column(String(32), default="2核4G", nullable=False)
+    provider: Mapped[str] = mapped_column(String(32), default="local-docker", nullable=False)
+    container_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    status: Mapped[str] = mapped_column(String(24), default="active", nullable=False, index=True)  # active | idle | stopped | failed
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    last_active_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    stopped_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_seconds: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    credits_charged: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=Decimal("0.0000"), nullable=False)
+    failure_free: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+
+class AssetToolJob(Base):
+    __tablename__ = "asset_tool_jobs"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_prefixed_id("atj"))
+    project_id: Mapped[str] = mapped_column(String(40), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    canvas_id: Mapped[str] = mapped_column(String(40), ForeignKey("canvases.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id: Mapped[Optional[str]] = mapped_column(String(40), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    tool_name: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    input_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    output_json: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    status: Mapped[str] = mapped_column(String(24), default="running", nullable=False)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)

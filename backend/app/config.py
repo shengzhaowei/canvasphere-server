@@ -98,6 +98,12 @@ class Settings:
     model_gateway_base_url: str
     model_gateway_api_key: str
 
+    # P2: Context compression, TaskRun leases & Sandbox
+    context_compress_threshold_tokens: int
+    task_run_lease_ttl_seconds: int
+    sandbox_default_cap_credits: float
+    sandbox_default_idle_minutes: int
+
     @property
     def effective_storage_backend(self) -> str:
         mode = self.storage_backend.strip().lower()
@@ -160,4 +166,8 @@ def get_settings() -> Settings:
         voice_first_use_credits=_float_env("VOICE_FIRST_USE_CREDITS", 1000.0),
         model_gateway_base_url=os.environ.get("MODEL_GATEWAY_BASE_URL", "").strip().rstrip("/"),
         model_gateway_api_key=os.environ.get("MODEL_GATEWAY_API_KEY", "").strip(),
+        context_compress_threshold_tokens=_int_env("CONTEXT_COMPRESS_THRESHOLD_TOKENS", 4000),
+        task_run_lease_ttl_seconds=_int_env("TASK_RUN_LEASE_TTL_SECONDS", 120),
+        sandbox_default_cap_credits=_float_env("SANDBOX_DEFAULT_CAP_CREDITS", 500.0),
+        sandbox_default_idle_minutes=_int_env("SANDBOX_DEFAULT_IDLE_MINUTES", 2),
     )

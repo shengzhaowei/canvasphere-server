@@ -24,6 +24,9 @@ _P0_STRICT_MODULES = {
     "test_canvas_objects_leases_sse.py",
     "test_billing_wallet_redeem.py",
     "test_multimodal_generations.py",
+    "test_studio_agents_and_runs.py",
+    "test_sandbox_lifecycle_and_billing.py",
+    "test_asset_tools_and_alembic_p2.py",
 }
 
 
