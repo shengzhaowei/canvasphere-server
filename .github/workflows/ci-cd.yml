@@ -40,14 +40,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Show deploy key fingerprint (debug, fingerprint only)
-        run: |
-          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > /tmp/deploy_key
-          chmod 600 /tmp/deploy_key
-          ssh-keygen -lf /tmp/deploy_key
-          rm -f /tmp/deploy_key
-
       - name: Pack source (same excludes as local scripts/package.sh)
         run: |
           # NOTE: the archive must NOT be created inside the directory being
@@ -87,4 +79,4 @@ jobs:
             # .env 在服务器上，不在包里，不会被覆盖
             docker compose up -d --build
             docker compose ps
-            curl -fsS http://localhost:8000/health
+            for i in $(seq 1 30); do curl -fsS http://localhost:8000/health && break || sleep 2; done
