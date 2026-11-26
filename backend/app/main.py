@@ -11,6 +11,7 @@ merges host events into each task's `events` field, deduped.
 """
 from __future__ import annotations
 
+from contextlib import AsyncExitStack, asynccontextmanager
 import logging
 import os
 import shutil
@@ -40,11 +41,14 @@ from app.rate_cards_seed import ensure_rate_cards_seeded  # noqa: E402
 from app.routers.asset_tools import router as asset_tools_router  # noqa: E402
 from app.routers.auth import router as auth_router  # noqa: E402
 from app.routers.billing import router as billing_router  # noqa: E402
+from app.routers.byok import router as byok_router  # noqa: E402
 from app.routers.canvas import router as canvas_router  # noqa: E402
 from app.routers.generations import router as generations_router  # noqa: E402
+from app.routers.mcp_mgmt import router as mcp_mgmt_router  # noqa: E402
 from app.routers.profile import router as profile_router  # noqa: E402
 from app.routers.projects import router as projects_router  # noqa: E402
 from app.routers.sandbox import router as sandbox_router  # noqa: E402
+from app.routers.skills_mgmt import router as skills_mgmt_router  # noqa: E402
 from app.routers.storage import router as storage_router  # noqa: E402
 from app.routers.studio import router as studio_router  # noqa: E402
 from app.skills import is_skill_enabled, list_skills, load_skill, set_skill_enabled  # noqa: E402
@@ -72,6 +76,9 @@ app.include_router(generations_router)
 app.include_router(studio_router)
 app.include_router(sandbox_router)
 app.include_router(asset_tools_router)
+app.include_router(skills_mgmt_router)
+app.include_router(mcp_mgmt_router)
+app.include_router(byok_router)
 
 session_host = None  # created lazily to avoid import-time side effects
 
@@ -568,12 +575,27 @@ def toggle_skill(
     return {"name": name, "project_id": body.project_id, "enabled": enabled}
 
 
-# --- MCP over HTTP/SSE (streamable-http), same tools as stdio ------------
+# --- MCP over HTTP/SSE (streamable-http): /mcp/canvas, /mcp/pecan & legacy /mcp
 try:
-    from app.mcp_server import mcp as _mcp  # noqa: E402
+    from app.mcp_server import mcp as _mcp, mcp_canvas as _mcp_canvas, mcp_pecan as _mcp_pecan  # noqa: E402
+
+    _mcp_canvas_app = _mcp_canvas.http_app(path="/", transport="streamable-http")
+    _mcp_pecan_app = _mcp_pecan.http_app(path="/", transport="streamable-http")
     _mcp_app = _mcp.http_app(path="/", transport="streamable-http")
-    app.router.lifespan_context = _mcp_app.lifespan
+
+    @asynccontextmanager
+    async def _combined_mcp_lifespan(parent_app: FastAPI):
+        async with AsyncExitStack() as stack:
+            await stack.enter_async_context(_mcp_canvas_app.lifespan(parent_app))
+            await stack.enter_async_context(_mcp_pecan_app.lifespan(parent_app))
+            await stack.enter_async_context(_mcp_app.lifespan(parent_app))
+            yield
+
+    app.router.lifespan_context = _combined_mcp_lifespan
+    # Specific subpaths must be mounted before /mcp
+    app.mount("/mcp/canvas", _mcp_canvas_app)
+    app.mount("/mcp/pecan", _mcp_pecan_app)
     app.mount("/mcp", _mcp_app)
-    logger.info("MCP streamable-http mounted at /mcp")
+    logger.info("MCP streamable-http mounted at /mcp/canvas, /mcp/pecan, and /mcp")
 except Exception as exc:  # noqa: BLE001 - stdio MCP still works
     logger.warning("MCP http transport unavailable (%s); stdio only", exc)

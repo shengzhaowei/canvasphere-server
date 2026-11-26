@@ -1,9 +1,8 @@
-"""Skill loader: reads ../../skills/<name>/SKILL.md.
+"""Skill loader: reads ../../skills/<name>/SKILL.md + DB-backed custom skills.
 
-Parses the YAML-ish frontmatter (name, description) plus the body
-(the skill's workflow). Missing skills raise FileNotFoundError with
-a clear message -- never silently skipped. Per-project enable/disable
-is kept in memory (default: enabled).
+Supports 9 Pecan Studio categories and persists per-project enable/disable
+state in `project_installed_skills` when the project exists in DB, while
+keeping an in-memory mirror so unit tests without DB rows still pass cleanly.
 """
 from __future__ import annotations
 
@@ -11,10 +10,32 @@ import re
 from pathlib import Path
 from typing import Any, Optional
 
+from sqlalchemy import select
+
+from app.db import session_scope
+from app.models import Project, ProjectInstalledSkill, UserSkill, new_prefixed_id, utcnow
+
 SKILLS_DIR = Path(__file__).resolve().parents[2] / "skills"
+
+SKILL_CATEGORIES = (
+    "剧本与故事",
+    "分镜与摄影",
+    "画面与风格",
+    "视频创作",
+    "动作与特效",
+    "声音与配乐",
+    "素材与后期",
+    "研究与辅助",
+    "未分类",
+)
 
 # (project_id, skill_name) -> enabled
 _overrides: dict[tuple[str, str], bool] = {}
+
+
+def normalize_category(raw: Optional[str]) -> str:
+    val = (raw or "").strip()
+    return val if val in SKILL_CATEGORIES else "未分类"
 
 
 def _parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
@@ -41,11 +62,7 @@ def _skill_path(name: str, skills_dir: Optional[Path] = None) -> Path:
 
 
 def list_skills(skills_dir: Optional[Path] = None) -> list[dict[str, Any]]:
-    """All skills found under skills_dir (default: ../../skills/).
-
-    Directories without SKILL.md are skipped and reported in the
-    entry as missing_file so a half-built skill is visible, not hidden.
-    """
+    """All built-in skills found under skills_dir (default: ../../skills/)."""
     base = Path(skills_dir) if skills_dir else SKILLS_DIR
     out: list[dict[str, Any]] = []
     if not base.is_dir():
@@ -65,26 +82,84 @@ def list_skills(skills_dir: Optional[Path] = None) -> list[dict[str, Any]]:
 
 
 def load_skill(name: str, skills_dir: Optional[Path] = None) -> dict[str, Any]:
-    """Load one skill. Raises FileNotFoundError if it does not exist."""
+    """Load one skill from filesystem, falling back to DB custom skills when skills_dir is default."""
     path = _skill_path(name, skills_dir)
-    if not path.is_file():
-        raise FileNotFoundError(
-            f"skill not found: {name!r} (expected {path})")
-    text = path.read_text(encoding="utf-8")
-    meta, body = _parse_frontmatter(text)
-    return {
-        "name": meta.get("name", name),
-        "description": meta.get("description", ""),
-        "path": str(path),
-        "content": body.strip(),
-        "frontmatter": meta,
-    }
+    if path.is_file():
+        text = path.read_text(encoding="utf-8")
+        meta, body = _parse_frontmatter(text)
+        return {
+            "name": meta.get("name", name),
+            "description": meta.get("description", ""),
+            "category": normalize_category(meta.get("category")),
+            "path": str(path),
+            "content": body.strip(),
+            "frontmatter": meta,
+        }
+    if skills_dir is None:
+        try:
+            with session_scope() as db:
+                row = db.scalar(
+                    select(UserSkill)
+                    .where(UserSkill.name == name)
+                    .order_by(UserSkill.updated_at.desc())
+                    .limit(1)
+                )
+                if row is not None:
+                    return {
+                        "id": row.id,
+                        "name": row.name,
+                        "description": row.description,
+                        "category": normalize_category(row.category),
+                        "path": f"db://user_skills/{row.id}",
+                        "content": row.content,
+                        "frontmatter": dict(row.frontmatter_json or {}),
+                    }
+        except Exception:
+            pass
+    raise FileNotFoundError(f"skill not found: {name!r} (expected {path})")
 
 
 def is_skill_enabled(project_id: str, name: str) -> bool:
-    return _overrides.get((project_id, name), True)
+    if (project_id, name) in _overrides:
+        return _overrides[(project_id, name)]
+    try:
+        with session_scope() as db:
+            row = db.scalar(
+                select(ProjectInstalledSkill).where(
+                    ProjectInstalledSkill.project_id == project_id,
+                    ProjectInstalledSkill.skill_name == name,
+                )
+            )
+            if row is not None:
+                return bool(row.enabled)
+    except Exception:
+        pass
+    return True
 
 
 def set_skill_enabled(project_id: str, name: str, enabled: bool) -> bool:
-    _overrides[(project_id, name)] = bool(enabled)
-    return bool(enabled)
+    val = bool(enabled)
+    _overrides[(project_id, name)] = val
+    try:
+        with session_scope() as db:
+            if db.get(Project, project_id) is not None:
+                row = db.scalar(
+                    select(ProjectInstalledSkill).where(
+                        ProjectInstalledSkill.project_id == project_id,
+                        ProjectInstalledSkill.skill_name == name,
+                    )
+                )
+                if row is None:
+                    db.add(ProjectInstalledSkill(
+                        id=new_prefixed_id("psk"),
+                        project_id=project_id,
+                        skill_name=name,
+                        enabled=val,
+                        installed_at=utcnow(),
+                    ))
+                else:
+                    row.enabled = val
+                    db.add(row)
+    except Exception:
+        pass
+    return val

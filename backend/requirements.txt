@@ -13,6 +13,7 @@ httpx
 fastmcp
 pyjwt
 bcrypt
+cryptography
 python-multipart
 boto3
 pytest

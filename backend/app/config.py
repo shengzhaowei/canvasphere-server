@@ -104,6 +104,11 @@ class Settings:
     sandbox_default_cap_credits: float
     sandbox_default_idle_minutes: int
 
+    # P3: Skills upload, MCP OAuth DCR & BYOK encryption
+    skill_zip_max_bytes: int
+    mcp_grant_default_ttl_days: int
+    byok_encryption_key: str
+
     @property
     def effective_storage_backend(self) -> str:
         mode = self.storage_backend.strip().lower()
@@ -170,4 +175,7 @@ def get_settings() -> Settings:
         task_run_lease_ttl_seconds=_int_env("TASK_RUN_LEASE_TTL_SECONDS", 120),
         sandbox_default_cap_credits=_float_env("SANDBOX_DEFAULT_CAP_CREDITS", 500.0),
         sandbox_default_idle_minutes=_int_env("SANDBOX_DEFAULT_IDLE_MINUTES", 2),
+        skill_zip_max_bytes=_int_env("SKILL_ZIP_MAX_BYTES", 10 * 1024 * 1024),
+        mcp_grant_default_ttl_days=_int_env("MCP_GRANT_DEFAULT_TTL_DAYS", 30),
+        byok_encryption_key=os.environ.get("BYOK_ENCRYPTION_KEY", "").strip(),
     )

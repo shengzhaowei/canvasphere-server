@@ -27,6 +27,9 @@ _P0_STRICT_MODULES = {
     "test_studio_agents_and_runs.py",
     "test_sandbox_lifecycle_and_billing.py",
     "test_asset_tools_and_alembic_p2.py",
+    "test_skills_upload_and_install.py",
+    "test_mcp_dual_oauth_dcr.py",
+    "test_byok_and_alembic_p3.py",
 }
 
 

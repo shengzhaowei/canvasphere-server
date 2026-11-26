@@ -502,3 +502,130 @@ class AssetToolJob(Base):
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+# --- Phase P3: Skills Management, MCP OAuth DCR & BYOK Model Platform ----
+class UserSkill(Base):
+    __tablename__ = "user_skills"
+    __table_args__ = (
+        UniqueConstraint("owner_user_id", "name", name="uq_user_skill_owner_name"),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_prefixed_id("skl"))
+    owner_user_id: Mapped[Optional[str]] = mapped_column(String(40), ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    display_name: Mapped[str] = mapped_column(String(128), default="", nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    category: Mapped[str] = mapped_column(String(32), default="未分类", nullable=False, index=True)
+    content: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    frontmatter_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    files_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    is_builtin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class ProjectInstalledSkill(Base):
+    __tablename__ = "project_installed_skills"
+    __table_args__ = (
+        UniqueConstraint("project_id", "skill_name", name="uq_project_installed_skill"),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_prefixed_id("psk"))
+    project_id: Mapped[str] = mapped_column(String(40), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    skill_id: Mapped[Optional[str]] = mapped_column(String(40), ForeignKey("user_skills.id", ondelete="SET NULL"), nullable=True)
+    skill_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    installed_by: Mapped[Optional[str]] = mapped_column(String(40), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    installed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class McpOAuthClient(Base):
+    __tablename__ = "mcp_oauth_clients"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_prefixed_id("mcl"))
+    client_id: Mapped[str] = mapped_column(String(96), unique=True, nullable=False, index=True)
+    client_secret_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    client_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    redirect_uris_json: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    grant_types_json: Mapped[list[str]] = mapped_column(JSON, default=lambda: ["authorization_code"], nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class McpOAuthCode(Base):
+    __tablename__ = "mcp_oauth_codes"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_prefixed_id("mcd"))
+    code_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    client_id: Mapped[str] = mapped_column(String(96), nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(String(40), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    project_id: Mapped[str] = mapped_column(String(40), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    server_type: Mapped[str] = mapped_column(String(24), default="canvas", nullable=False)  # canvas | pecan | both
+    scopes_json: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    code_challenge: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    code_challenge_method: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    redirect_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class McpGrant(Base):
+    __tablename__ = "mcp_grants"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_prefixed_id("mgr"))
+    client_id: Mapped[str] = mapped_column(String(96), nullable=False, index=True)
+    client_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    user_id: Mapped[str] = mapped_column(String(40), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    project_id: Mapped[str] = mapped_column(String(40), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    server_type: Mapped[str] = mapped_column(String(24), default="canvas", nullable=False)
+    scopes_json: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class ByokEntitlement(Base):
+    __tablename__ = "byok_entitlements"
+
+    user_id: Mapped[str] = mapped_column(String(40), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    max_channels: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    max_offerings_per_channel: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class ByokChannel(Base):
+    __tablename__ = "byok_channels"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_prefixed_id("chn"))
+    user_id: Mapped[str] = mapped_column(String(40), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    protocol_profile: Mapped[str] = mapped_column(String(64), nullable=False)
+    base_url: Mapped[str] = mapped_column(Text, nullable=False)
+    api_key_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    api_key_masked: Mapped[str] = mapped_column(String(32), nullable=False)
+    rpm_limit: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class ByokOffering(Base):
+    __tablename__ = "byok_offerings"
+    __table_args__ = (
+        UniqueConstraint("channel_id", "canonical_model_key", name="uq_byok_channel_model"),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_prefixed_id("off"))
+    user_id: Mapped[str] = mapped_column(String(40), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    channel_id: Mapped[str] = mapped_column(String(40), ForeignKey("byok_channels.id", ondelete="CASCADE"), nullable=False, index=True)
+    canonical_model_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    upstream_model_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    verified_status: Mapped[str] = mapped_column(String(24), default="unverified", nullable=False)  # unverified | verified | failed
+    last_verified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    verification_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
