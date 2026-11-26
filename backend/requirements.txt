@@ -16,4 +16,6 @@ bcrypt
 cryptography
 python-multipart
 boto3
+redis
+arq
 pytest

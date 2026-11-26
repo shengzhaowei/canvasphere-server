@@ -9,8 +9,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app import auth, billing
+from app.config import get_settings
 from app.db import get_db
 from app.models import OAuthBinding, User, new_prefixed_id, utcnow
+from app.redis_client import rate_limiter
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -46,9 +48,12 @@ def send_code(
     request: Request,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    settings = get_settings()
+    norm_email = (body.email or "").strip().lower()
+    rate_limiter.check("email_code", norm_email or "unknown", settings.rate_limit_email_code_per_min, 60)
     user = auth.get_optional_current_user(request, db)
     auth.send_email_code(db, body.email, body.purpose, user_id=user.id if user else None)
-    return {"sent": True, "email": body.email.strip().lower(), "purpose": body.purpose}
+    return {"sent": True, "email": norm_email, "purpose": body.purpose}
 
 
 @router.post("/register", status_code=201)
@@ -98,7 +103,9 @@ def login(
     response: Response,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    settings = get_settings()
     norm_email = body.email.strip().lower()
+    rate_limiter.check("login", norm_email or "unknown", settings.rate_limit_login_per_min, 60)
     user = db.scalar(select(User).where(User.email == norm_email))
     if user is None or not user.is_active or not auth.verify_password(body.password, user.password_hash):
         raise HTTPException(status_code=401, detail="invalid email or password")

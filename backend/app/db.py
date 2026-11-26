@@ -59,7 +59,23 @@ def _build_engine(url: str) -> Engine:
             cursor.close()
 
         return eng
-    return create_engine(url, pool_pre_ping=True, future=True)
+    settings = get_settings()
+    return create_engine(
+        url,
+        pool_pre_ping=True,
+        pool_size=settings.db_pool_size,
+        max_overflow=settings.db_max_overflow,
+        pool_recycle=1800,
+        future=True,
+    )
+
+
+def lock_for_update(stmt, db: Session):
+    """Apply SELECT ... FOR UPDATE on PostgreSQL; safe no-op on SQLite."""
+    dialect = db.bind.dialect.name if db.bind is not None else ""
+    if dialect == "postgresql":
+        return stmt.with_for_update()
+    return stmt
 
 
 def get_engine() -> Engine:

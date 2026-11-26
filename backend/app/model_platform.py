@@ -510,107 +510,54 @@ def serialize_job(job: GenerationJob) -> dict[str, Any]:
     }
 
 
-def run_generation_pipeline(
-    db: Session,
-    *,
-    project: Project,
-    canvas: Canvas,
-    user_id: Optional[str],
-    modality: str,
-    model_key: str,
-    mode: str,
-    prompt: str,
-    params: dict[str, Any],
-    target_object_id: Optional[str] = None,
-    input_object_ids: Optional[list[str]] = None,
-    parent_job_id: Optional[str] = None,
-    payment_source: str = "platform_credits",
-) -> dict[str, Any]:
-    """End-to-end synchronous/background-ready generation pipeline:
-    validate -> estimate -> reserve credits -> invoke provider -> store artifact
-    -> update/create canvas node -> settle/refund -> broadcast SSE events.
-    """
-    card = get_rate_card(db, model_key, expected_modality=modality)
-    if modality == "image":
-        validate_image_params(card, params)
-    elif modality == "video":
-        validate_video_params(card, mode, params)
-    elif modality == "audio":
-        validate_audio_params(card, mode, params)
-    elif modality == "music":
-        op = str(params.get("operation") or mode).lower()
-        validate_music_params(mode, op, params)
+def execute_existing_generation_job(db: Session, job: GenerationJob) -> dict[str, Any]:
+    """Execute a queued GenerationJob (called either inline or by the ARQ background worker)."""
+    project = db.get(Project, job.project_id)
+    canvas = db.get(Canvas, job.canvas_id)
+    if project is None or canvas is None:
+        job.status = "failed"
+        job.error_message = "project or canvas no longer exists"
+        job.completed_at = utcnow()
+        db.add(job)
+        db.commit()
+        return serialize_job(job)
 
-    # Validate target node if supplied
-    target_obj: Optional[CanvasObject] = None
-    if target_object_id:
-        target_obj = db.get(CanvasObject, target_object_id)
-        if target_obj is None or target_obj.canvas_id != canvas.id or target_obj.deleted_at is not None:
-            raise HTTPException(status_code=404, detail=f"target object not found: {target_object_id}")
-
+    card = get_rate_card(db, job.model_key)
+    params = dict(job.params_json or {})
     estimate = billing.estimate_generation_cost(
         db,
         card.model_key,
-        {**params, "mode": mode, "prompt": prompt},
-        user_id=user_id,
+        {**params, "mode": job.mode, "prompt": job.prompt},
+        user_id=job.user_id,
     )
     est_credits = Decimal(str(estimate["estimated_credits"]))
     surcharge_credits = Decimal(str(estimate["surcharge_credits"]))
 
-    job = GenerationJob(
-        id=new_prefixed_id("gen"),
-        request_id=uuid.uuid4().hex,
-        user_id=user_id,
-        project_id=project.id,
-        canvas_id=canvas.id,
-        target_object_id=target_obj.id if target_obj else None,
-        parent_job_id=parent_job_id,
-        modality=modality,
-        model_key=card.model_key,
-        protocol_profile=card.protocol_profile,
-        mode=mode,
-        prompt=prompt,
-        params_json=dict(params),
-        input_object_ids_json=list(input_object_ids or []),
-        status="running",
-        progress=10,
-        payment_source=payment_source,
-        mock=True,
-        created_at=utcnow(),
-        updated_at=utcnow(),
+    target_obj: Optional[CanvasObject] = (
+        db.get(CanvasObject, job.target_object_id) if job.target_object_id else None
     )
+    job.status = "running"
+    job.progress = 10
+    job.updated_at = utcnow()
     db.add(job)
-    db.flush()
-
-    reservation_id: Optional[str] = None
-    if user_id and payment_source == "platform_credits" and est_credits > Decimal("0"):
-        res = billing.reserve_credits(
-            db,
-            user_id=user_id,
-            estimated_credits=est_credits,
-            source_type="generation",
-            source_id=job.id,
-        )
-        reservation_id = res.id
-        job.reservation_id = reservation_id
     db.commit()
 
     event_bus.publish(
         project.id,
         canvas.id,
         "generation.progress",
-        {"job_id": job.id, "status": "running", "progress": 10, "modality": modality},
-        actor_id=user_id,
+        {"job_id": job.id, "status": "running", "progress": 10, "modality": job.modality},
+        actor_id=job.user_id,
     )
 
     try:
-        provider_res = invoke_provider(card=card, mode=mode, prompt=prompt, params=params)
+        provider_res = invoke_provider(card=card, mode=job.mode, prompt=job.prompt, params=params)
         stored_artifacts: list[dict[str, Any]] = []
         for art in provider_res.artifacts:
             saved = _persist_generated_artifact(
                 db,
                 project=project,
-                owner_user_id=user_id,
+                owner_user_id=job.user_id,
                 filename=art["filename"],
                 content_type=art["content_type"],
                 data=art["bytes"],
@@ -619,8 +566,7 @@ def run_generation_pipeline(
             saved["meta"] = art.get("meta") or {}
             stored_artifacts.append(saved)
 
-        # Update target canvas node or auto-create a node for the output
-        node_type = {"image": "image", "video": "video", "audio": "audio", "music": "music"}.get(modality, "file")
+        node_type = {"image": "image", "video": "video", "audio": "audio", "music": "music"}.get(job.modality, "file")
         now = utcnow()
         if target_obj is None:
             target_obj = CanvasObject(
@@ -633,7 +579,7 @@ def run_generation_pipeline(
                 y=80.0,
                 w=360.0,
                 h=240.0,
-                text=prompt[:500],
+                text=job.prompt[:500],
                 media_type=node_type,
                 version=1,
                 created_at=now,
@@ -653,8 +599,8 @@ def run_generation_pipeline(
         }
         target_obj.content_json = {
             **(target_obj.content_json or {}),
-            "prompt": prompt,
-            "mode": mode,
+            "prompt": job.prompt,
+            "mode": job.mode,
             "metadata": provider_res.metadata,
         }
         target_obj.version = int(target_obj.version) + 1
@@ -673,12 +619,11 @@ def run_generation_pipeline(
         job.updated_at = now
         db.add(job)
 
-        # Billing settlement: mock runs refund frozen credits (mock_free); live runs settle actual credits
-        if reservation_id:
+        if job.reservation_id:
             if provider_res.mock:
                 billing.release_reservation(
                     db,
-                    reservation_id,
+                    job.reservation_id,
                     record_refund_usage=True,
                     project_id=project.id,
                     job_id=job.id,
@@ -689,7 +634,7 @@ def run_generation_pipeline(
             else:
                 surcharge_info = None
                 voice_id = str(params.get("voice_id") or "").strip()
-                if card.modality == "tts" and mode == "tts" and voice_id and surcharge_credits > Decimal("0") and user_id:
+                if card.modality == "tts" and job.mode == "tts" and voice_id and surcharge_credits > Decimal("0") and job.user_id:
                     surcharge_info = {
                         "charge_type": "voice_first_use",
                         "description": f"首次使用音色附加费 ({voice_id})",
@@ -698,21 +643,21 @@ def run_generation_pipeline(
                     }
                     db.add(UserVoiceActivation(
                         id=new_prefixed_id("vac"),
-                        user_id=user_id,
+                        user_id=job.user_id,
                         voice_id=voice_id,
                         credits_charged=surcharge_credits,
                         activated_at=now,
                     ))
                 billing.settle_reservation(
                     db,
-                    reservation_id,
+                    job.reservation_id,
                     actual_credits=est_credits,
                     project_id=project.id,
                     job_id=job.id,
                     modality=card.modality,
                     model_key=card.model_key,
-                    payment_source=payment_source,
-                    quantity={"mode": mode, "artifacts": len(stored_artifacts)},
+                    payment_source=job.payment_source,
+                    quantity={"mode": job.mode, "artifacts": len(stored_artifacts)},
                     status_label="settled",
                     surcharge_charge=surcharge_info,
                 )
@@ -725,11 +670,11 @@ def run_generation_pipeline(
             {
                 "job_id": job.id,
                 "target_object_id": target_obj.id,
-                "modality": modality,
+                "modality": job.modality,
                 "mock": provider_res.mock,
                 "artifacts": stored_artifacts,
             },
-            actor_id=user_id,
+            actor_id=job.user_id,
         )
         return {**serialize_job(job), "estimate": estimate}
 
@@ -739,10 +684,10 @@ def run_generation_pipeline(
         job.completed_at = utcnow()
         job.updated_at = job.completed_at
         db.add(job)
-        if reservation_id:
+        if job.reservation_id:
             billing.release_reservation(
                 db,
-                reservation_id,
+                job.reservation_id,
                 record_refund_usage=True,
                 project_id=project.id,
                 job_id=job.id,
@@ -756,6 +701,99 @@ def run_generation_pipeline(
             canvas.id,
             "generation.failed",
             {"job_id": job.id, "error": str(exc)},
-            actor_id=user_id,
+            actor_id=job.user_id,
         )
         return {**serialize_job(job), "estimate": estimate}
+
+
+def run_generation_pipeline(
+    db: Session,
+    *,
+    project: Project,
+    canvas: Canvas,
+    user_id: Optional[str],
+    modality: str,
+    model_key: str,
+    mode: str,
+    prompt: str,
+    params: dict[str, Any],
+    target_object_id: Optional[str] = None,
+    input_object_ids: Optional[list[str]] = None,
+    parent_job_id: Optional[str] = None,
+    payment_source: str = "platform_credits",
+) -> dict[str, Any]:
+    """Validate -> estimate -> reserve credits -> dispatch to ARQ worker (if enabled) or run inline."""
+    card = get_rate_card(db, model_key, expected_modality=modality)
+    if modality == "image":
+        validate_image_params(card, params)
+    elif modality == "video":
+        validate_video_params(card, mode, params)
+    elif modality == "audio":
+        validate_audio_params(card, mode, params)
+    elif modality == "music":
+        op = str(params.get("operation") or mode).lower()
+        validate_music_params(mode, op, params)
+
+    target_obj: Optional[CanvasObject] = None
+    if target_object_id:
+        target_obj = db.get(CanvasObject, target_object_id)
+        if target_obj is None or target_obj.canvas_id != canvas.id or target_obj.deleted_at is not None:
+            raise HTTPException(status_code=404, detail=f"target object not found: {target_object_id}")
+
+    estimate = billing.estimate_generation_cost(
+        db,
+        card.model_key,
+        {**params, "mode": mode, "prompt": prompt},
+        user_id=user_id,
+    )
+    est_credits = Decimal(str(estimate["estimated_credits"]))
+
+    job = GenerationJob(
+        id=new_prefixed_id("gen"),
+        request_id=uuid.uuid4().hex,
+        user_id=user_id,
+        project_id=project.id,
+        canvas_id=canvas.id,
+        target_object_id=target_obj.id if target_obj else None,
+        parent_job_id=parent_job_id,
+        modality=modality,
+        model_key=card.model_key,
+        protocol_profile=card.protocol_profile,
+        mode=mode,
+        prompt=prompt,
+        params_json=dict(params),
+        input_object_ids_json=list(input_object_ids or []),
+        status="queued",
+        progress=0,
+        payment_source=payment_source,
+        mock=True,
+        created_at=utcnow(),
+        updated_at=utcnow(),
+    )
+    db.add(job)
+    db.flush()
+
+    if user_id and payment_source == "platform_credits" and est_credits > Decimal("0"):
+        res = billing.reserve_credits(
+            db,
+            user_id=user_id,
+            estimated_credits=est_credits,
+            source_type="generation",
+            source_id=job.id,
+        )
+        job.reservation_id = res.id
+    db.commit()
+
+    # In 4C8G production with ARQ worker enabled, enqueue & return immediately
+    from app import worker
+    if worker.enqueue_generation_job(job.id):
+        event_bus.publish(
+            project.id,
+            canvas.id,
+            "generation.queued",
+            {"job_id": job.id, "modality": modality, "model_key": card.model_key},
+            actor_id=user_id,
+        )
+        return {**serialize_job(job), "estimate": estimate, "dispatched_async": True}
+
+    return execute_existing_generation_job(db, job)

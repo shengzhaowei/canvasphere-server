@@ -1,13 +1,25 @@
-# Canvasphere Server —— docker-compose.yml
-# 后端专用：FastAPI + LangGraph 多智能体、y-websocket 协同、Postgres。
-# 前端不在这里，住在 canvasphere 仓库（Vercel 部署）。
-# 总内存上限：各服务 limits 之和 1g + 256m + 1g + 256m（redis，默认不开）= 约 2.25GB。
-# 部署目标固定为服务器上的 /opt/canvasphere（与旧版同一目录、同一 compose
-# 项目名，pgdata 卷得以保留，数据库不丢；旧版 web 容器会成为孤儿容器，
-# 仍在跑，待新前端上线后再手动停掉）。
-# 使用前：cp .env.example .env，填好真实值后再 up。
+# Canvasphere Server —— 4 vCPU / 8 GiB RAM 轻量生产编排
+# 常驻内存约 1.2–1.6 GiB，总容器硬上限 3.84 GiB，为系统内核、FFmpeg 与并发沙盒留足 ~3.4 GiB 余量。
+# 使用前：cp .env.example .env，填好 JWT_SECRET / POSTGRES_PASSWORD / LLM 等真实值后再 up。
 
 services:
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      api:
+        condition: service_healthy
+      yjs:
+        condition: service_started
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+          cpus: "0.25"
+
   api:
     build: ./backend
     ports:
@@ -20,25 +32,63 @@ services:
       - LLM_MODEL=${LLM_MODEL}
       - E2B_API_KEY=${E2B_API_KEY:-}
       - DATABASE_URL=${DATABASE_URL:-postgresql://canvas:canvas@db:5432/canvas}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - ASYNC_WORKER_ENABLED=${ASYNC_WORKER_ENABLED:-true}
+      - UVICORN_WORKERS=${UVICORN_WORKERS:-2}
+      - DB_POOL_SIZE=${DB_POOL_SIZE:-5}
+      - DB_MAX_OVERFLOW=${DB_MAX_OVERFLOW:-10}
+      - SANDBOX_MAX_CONCURRENT=${SANDBOX_MAX_CONCURRENT:-2}
+      - SANDBOX_DOCKER_MEMORY=${SANDBOX_DOCKER_MEMORY:-512m}
+      - SANDBOX_DOCKER_CPUS=${SANDBOX_DOCKER_CPUS:-0.5}
+      - FFMPEG_THREADS=${FFMPEG_THREADS:-2}
       - AUTH_ALLOW_LEGACY_ROLE_HEADER=${AUTH_ALLOW_LEGACY_ROLE_HEADER:-false}
       - LOCAL_STORAGE_DIR=${LOCAL_STORAGE_DIR:-/data/storage}
     volumes:
-      # 本地 Docker 沙盒：把宿主机 docker.sock 挂进 api 容器，api 才能
-      # 在宿主机上起一次性沙盒容器（兄弟容器，不是容器套容器）。
-      # 注意：拿到 docker.sock 等于拿到宿主机 root 权限，只适用于
-      # 单租户自用服务器；不要把这个挂载用在多租户环境。
       - /var/run/docker.sock:/var/run/docker.sock
       - storage_data:/data/storage
+      - ./skills:/skills:ro
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     healthcheck:
-      # 要求后端镜像内装有 curl，且 FastAPI 提供 GET /health；否则请改用 python -c urllib 检查
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 20s
+      start_period: 25s
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: "1.0"
+
+  worker:
+    build: ./backend
+    command: ["arq", "app.worker.WorkerSettings"]
+    env_file:
+      - .env
+    environment:
+      - LLM_BASE_URL=${LLM_BASE_URL}
+      - LLM_API_KEY=${LLM_API_KEY}
+      - LLM_MODEL=${LLM_MODEL}
+      - DATABASE_URL=${DATABASE_URL:-postgresql://canvas:canvas@db:5432/canvas}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - ASYNC_WORKER_ENABLED=true
+      - DB_POOL_SIZE=3
+      - DB_MAX_OVERFLOW=5
+      - FFMPEG_THREADS=${FFMPEG_THREADS:-2}
+      - FFMPEG_MAX_CONCURRENT=${FFMPEG_MAX_CONCURRENT:-1}
+      - LOCAL_STORAGE_DIR=${LOCAL_STORAGE_DIR:-/data/storage}
+    volumes:
+      - storage_data:/data/storage
+      - ./skills:/skills:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     deploy:
       resources:
         limits:
@@ -46,14 +96,6 @@ services:
           cpus: "1.0"
 
   yjs:
-    # 2026-11-25 infra 验证结论：旧写法（node:20-alpine + corepack + pnpm dlx
-    # y-websocket --port 1234 --host 0.0.0.0）有两个问题，已改掉：
-    # 1) y-websocket 的 bin/server.cjs 只读 HOST/PORT 环境变量，不解析
-    #    --port/--host 参数（实测：传参后仍打印 running at 'localhost' on
-    #    port 1234，12399 端口无响应），默认绑 localhost，容器外不可达；
-    # 2) pnpm dlx 每次启动都要联网拉包。改为 ./yjs/Dockerfile：构建期
-    #    npm install 锁定 y-websocket@2.1.0（与 frontend 已装版本一致），
-    #    启动用 HOST=0.0.0.0 PORT=1234 环境变量。未用 docker 验证构建。
     build: ./yjs
     environment:
       - HOST=0.0.0.0
@@ -69,17 +111,23 @@ services:
   db:
     image: postgres:16-alpine
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     environment:
-      # 占位值：仅供本地开发，生产环境务必改成强密码
-      - POSTGRES_USER=canvas
-      - POSTGRES_PASSWORD=canvas
-      - POSTGRES_DB=canvas
-    command: ["postgres", "-c", "shared_buffers=256MB"]
+      - POSTGRES_USER=${POSTGRES_USER:-canvas}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-canvas}
+      - POSTGRES_DB=${POSTGRES_DB:-canvas}
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_buffers=256MB"
+      - "-c"
+      - "work_mem=4MB"
+      - "-c"
+      - "max_connections=60"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U canvas -d canvas"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-canvas} -d ${POSTGRES_DB:-canvas}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -87,21 +135,28 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1g
+          memory: 1200m
           cpus: "1.0"
 
   redis:
-    profiles:
-      - optional
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
+    command: ["redis-server", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
     deploy:
       resources:
         limits:
           memory: 256m
-          cpus: "0.5"
+          cpus: "0.25"
 
 volumes:
   pgdata:
+  redis_data:
   storage_data:

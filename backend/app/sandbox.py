@@ -33,9 +33,11 @@ def run_local_docker(code: str, timeout: int = 30) -> dict[str, Any]:
                 "exit_code": None,
                 "error": "本地沙盒不可用：未安装 docker"}
     try:
+        from app.config import get_settings
+        s = get_settings()
         proc = subprocess.run(
             ["docker", "run", "--rm", "--network", "none",
-             "--memory", "512m", "--cpus", "0.5", "--pids-limit", "128",
+             "--memory", s.sandbox_docker_memory, "--cpus", s.sandbox_docker_cpus, "--pids-limit", "128",
              "python:3.12-slim", "python", "-c", code],
             capture_output=True, text=True, timeout=timeout)
         return {"sandbox": "local-docker",

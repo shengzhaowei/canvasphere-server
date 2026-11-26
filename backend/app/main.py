@@ -243,6 +243,7 @@ class ApprovalGrantCreate(BaseModel):
 # --- system routes --------------------------------------------------------
 @app.get("/health")
 def health() -> dict[str, Any]:
+    from app.redis_client import redis_status
     _kind = get_checkpointer()[1]
     settings = get_settings()
     return {
@@ -250,6 +251,8 @@ def health() -> dict[str, Any]:
         "mode": _mode(),
         "checkpointer": _kind,
         "db": db_kind(),
+        "redis": redis_status(),
+        "async_worker": settings.async_worker_enabled,
         "storage_backend": settings.effective_storage_backend,
     }
 

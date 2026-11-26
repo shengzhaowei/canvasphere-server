@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.db import lock_for_update
 from app.models import (
     BillingChargeRecord,
     BillingUsageRecord,
@@ -43,8 +44,11 @@ def _as_utc(dt: datetime) -> datetime:
     return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
 
 
-def get_or_create_wallet(db: Session, user_id: str) -> CreditWallet:
-    wallet = db.get(CreditWallet, user_id)
+def get_or_create_wallet(db: Session, user_id: str, *, for_update: bool = False) -> CreditWallet:
+    stmt = select(CreditWallet).where(CreditWallet.user_id == user_id)
+    if for_update:
+        stmt = lock_for_update(stmt, db)
+    wallet = db.scalar(stmt)
     if wallet is None:
         bonus = _d(get_settings().default_signup_bonus_credits)
         wallet = CreditWallet(
@@ -183,7 +187,7 @@ def reserve_credits(
     source_id: str,
 ) -> CreditReservation:
     amount = _d(estimated_credits)
-    wallet = get_or_create_wallet(db, user_id)
+    wallet = get_or_create_wallet(db, user_id, for_update=True)
     avail_bonus = max(ZERO, _d(wallet.bonus_credits) - _d(wallet.reserved_bonus_credits))
     avail_cash = max(ZERO, _d(wallet.cash_credits) - _d(wallet.reserved_cash_credits))
     total_avail = avail_bonus + avail_cash
@@ -239,13 +243,13 @@ def settle_reservation(
     status_label: str = "settled",
     surcharge_charge: Optional[dict[str, Any]] = None,
 ) -> BillingUsageRecord:
-    res = db.get(CreditReservation, reservation_id)
+    res = db.scalar(lock_for_update(select(CreditReservation).where(CreditReservation.id == reservation_id), db))
     if res is None:
         raise HTTPException(status_code=404, detail=f"reservation not found: {reservation_id}")
     if res.status != "reserved":
         raise HTTPException(status_code=409, detail=f"reservation already {res.status}")
 
-    wallet = get_or_create_wallet(db, res.user_id)
+    wallet = get_or_create_wallet(db, res.user_id, for_update=True)
     actual = max(ZERO, _d(actual_credits))
     # Cap settlement to reserved amount or deduct additional available if actual > reserved
     res_bonus = _d(res.reserved_bonus)
@@ -329,10 +333,10 @@ def release_reservation(
     model_key: str = "",
     status_label: str = "refunded",
 ) -> None:
-    res = db.get(CreditReservation, reservation_id)
+    res = db.scalar(lock_for_update(select(CreditReservation).where(CreditReservation.id == reservation_id), db))
     if res is None or res.status != "reserved":
         return
-    wallet = get_or_create_wallet(db, res.user_id)
+    wallet = get_or_create_wallet(db, res.user_id, for_update=True)
     wallet.reserved_bonus_credits = max(ZERO, (_d(wallet.reserved_bonus_credits) - _d(res.reserved_bonus)).quantize(Q4))
     wallet.reserved_cash_credits = max(ZERO, (_d(wallet.reserved_cash_credits) - _d(res.reserved_cash)).quantize(Q4))
     wallet.updated_at = utcnow()
@@ -406,7 +410,7 @@ def redeem_code(db: Session, user_id: str, raw_code: str) -> dict[str, Any]:
     norm = (raw_code or "").strip().upper()
     if not norm:
         raise HTTPException(status_code=400, detail="redeem code is required")
-    rc = db.scalar(select(RedeemCode).where(RedeemCode.code == norm))
+    rc = db.scalar(lock_for_update(select(RedeemCode).where(RedeemCode.code == norm), db))
     now = utcnow()
     if rc is None or not rc.is_active:
         raise HTTPException(status_code=404, detail="redeem code not found or inactive")
@@ -424,7 +428,7 @@ def redeem_code(db: Session, user_id: str, raw_code: str) -> dict[str, Any]:
     if already is not None:
         raise HTTPException(status_code=409, detail="you have already redeemed this code")
 
-    wallet = get_or_create_wallet(db, user_id)
+    wallet = get_or_create_wallet(db, user_id, for_update=True)
     amt = _d(rc.credits_amount)
     if rc.credit_pool == "cash":
         wallet.cash_credits = (_d(wallet.cash_credits) + amt).quantize(Q4)

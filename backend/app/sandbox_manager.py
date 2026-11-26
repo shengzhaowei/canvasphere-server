@@ -15,7 +15,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Optional
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app import billing, sandbox, storage
@@ -266,6 +266,21 @@ def execute_in_project_sandbox(
         .limit(1)
     )
     if sess is None:
+        # 4C8G host OOM guardrail: cap total concurrent active sandboxes globally
+        max_conc = get_settings().sandbox_max_concurrent
+        active_global = int(
+            db.scalar(select(func.count(SandboxSession.id)).where(SandboxSession.status == "active")) or 0
+        )
+        if active_global >= max_conc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "SANDBOX_CONCURRENCY_LIMIT",
+                    "message": f"host sandbox concurrency limit reached ({active_global}/{max_conc}); retry shortly",
+                    "active_sandboxes": active_global,
+                    "max_concurrent": max_conc,
+                },
+            )
         sess = SandboxSession(
             id=new_prefixed_id("sbs"),
             project_id=project.id,

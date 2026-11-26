@@ -109,6 +109,20 @@ class Settings:
     mcp_grant_default_ttl_days: int
     byok_encryption_key: str
 
+    # P4: 4C8G Production Hardening (Redis, ARQ, DB pool, FFmpeg, Sandbox & Rate limits)
+    redis_url: str
+    async_worker_enabled: bool
+    db_pool_size: int
+    db_max_overflow: int
+    sandbox_max_concurrent: int
+    sandbox_docker_memory: str
+    sandbox_docker_cpus: str
+    ffmpeg_threads: int
+    ffmpeg_max_concurrent: int
+    rate_limit_login_per_min: int
+    rate_limit_email_code_per_min: int
+    orphan_upload_max_age_hours: int
+
     @property
     def effective_storage_backend(self) -> str:
         mode = self.storage_backend.strip().lower()
@@ -178,4 +192,16 @@ def get_settings() -> Settings:
         skill_zip_max_bytes=_int_env("SKILL_ZIP_MAX_BYTES", 10 * 1024 * 1024),
         mcp_grant_default_ttl_days=_int_env("MCP_GRANT_DEFAULT_TTL_DAYS", 30),
         byok_encryption_key=os.environ.get("BYOK_ENCRYPTION_KEY", "").strip(),
+        redis_url=os.environ.get("REDIS_URL", "").strip(),
+        async_worker_enabled=_bool_env("ASYNC_WORKER_ENABLED", False),
+        db_pool_size=_int_env("DB_POOL_SIZE", 5),
+        db_max_overflow=_int_env("DB_MAX_OVERFLOW", 10),
+        sandbox_max_concurrent=_int_env("SANDBOX_MAX_CONCURRENT", 2),
+        sandbox_docker_memory=os.environ.get("SANDBOX_DOCKER_MEMORY", "512m").strip() or "512m",
+        sandbox_docker_cpus=os.environ.get("SANDBOX_DOCKER_CPUS", "0.5").strip() or "0.5",
+        ffmpeg_threads=_int_env("FFMPEG_THREADS", 2),
+        ffmpeg_max_concurrent=_int_env("FFMPEG_MAX_CONCURRENT", 1),
+        rate_limit_login_per_min=_int_env("RATE_LIMIT_LOGIN_PER_MIN", 20),
+        rate_limit_email_code_per_min=_int_env("RATE_LIMIT_EMAIL_CODE_PER_MIN", 5),
+        orphan_upload_max_age_hours=_int_env("ORPHAN_UPLOAD_MAX_AGE_HOURS", 24),
     )

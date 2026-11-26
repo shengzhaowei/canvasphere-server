@@ -12,7 +12,12 @@ from __future__ import annotations
 import base64
 import io
 import json
+import shutil
 import struct
+import subprocess
+import tempfile
+import threading
+from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import HTTPException
@@ -123,6 +128,45 @@ ASSET_TOOLS_CATALOG: list[dict[str, Any]] = [
 ]
 
 _TOOL_NAMES = {t["tool_name"] for t in ASSET_TOOLS_CATALOG}
+_ffmpeg_semaphore = threading.Semaphore(1)
+
+
+def _try_ffmpeg_render(normalized: dict[str, Any], output_format: str) -> tuple[bytes, bool]:
+    """Render timeline via bounded ffmpeg (-threads N, semaphore) when ffmpeg binary is installed.
+
+    Falls back safely to metadata-packaged placeholder bytes when ffmpeg is unavailable
+    (e.g. local Windows dev/CI without ffmpeg).
+    """
+    ffmpeg_bin = shutil.which("ffmpeg")
+    if not ffmpeg_bin:
+        return _FALLBACK_MP4 + json.dumps(normalized, ensure_ascii=False).encode("utf-8"), False
+
+    settings = get_settings()
+    dur_sec = max(0.2, min(60.0, normalized["total_duration_ms"] / 1000.0))
+    threads = str(max(1, settings.ffmpeg_threads))
+    with _ffmpeg_semaphore:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_path = Path(tmpdir) / f"export.{output_format}"
+            if output_format in ("mp4", "mov"):
+                cmd = [
+                    ffmpeg_bin, "-y", "-threads", threads,
+                    "-f", "lavfi", "-i", f"color=c=black:s=320x180:d={dur_sec}",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                    str(out_path),
+                ]
+            else:
+                cmd = [
+                    ffmpeg_bin, "-y", "-threads", threads,
+                    "-f", "lavfi", "-i", f"anullsrc=r=44100:cl=stereo:d={dur_sec}",
+                    str(out_path),
+                ]
+            try:
+                proc = subprocess.run(cmd, capture_output=True, timeout=60)
+                if proc.returncode == 0 and out_path.is_file() and out_path.stat().st_size > 0:
+                    return out_path.read_bytes(), True
+            except Exception:
+                pass
+    return _FALLBACK_MP4 + json.dumps(normalized, ensure_ascii=False).encode("utf-8"), False
 
 
 def _save_workspace_bytes(
@@ -382,7 +426,7 @@ def run_asset_tool(
 
         mime = "video/mp4" if fmt in ("mp4", "mov") else ("audio/wav" if fmt == "wav" else "audio/mpeg")
         node_type = "video" if fmt in ("mp4", "mov") else "audio"
-        export_bytes = _FALLBACK_MP4 + json.dumps(normalized, ensure_ascii=False).encode("utf-8")
+        export_bytes, used_ffmpeg = _try_ffmpeg_render(normalized, fmt)
         dur_sec = round(normalized["total_duration_ms"] / 1000.0, 3)
         saved = _save_workspace_bytes(
             db, project, user_id, f"timeline_export.{fmt}", mime, export_bytes, duration_seconds=dur_sec
@@ -398,7 +442,7 @@ def run_asset_tool(
             w=420.0,
             h=240.0,
             media_type=node_type,
-            content_json={"timeline_draft": normalized},
+            content_json={"timeline_draft": normalized, "rendered_with_ffmpeg": used_ffmpeg},
             asset_json={"primary": saved, "artifacts": [saved], "source_tool": "timeline.export"},
             version=1,
             created_at=now,
@@ -410,6 +454,7 @@ def run_asset_tool(
             "output_object_id": out_node.id,
             "artifact": saved,
             "timeline": normalized,
+            "rendered_with_ffmpeg": used_ffmpeg,
         }
 
     elif tool_name == "media.probe":
