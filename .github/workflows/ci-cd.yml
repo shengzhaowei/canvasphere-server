@@ -1,0 +1,90 @@
+# Canvasphere Server CI/CD：推代码 → 自动测试 → 自动部署到首尔服务器
+#
+# 流程：push / PR 到任意分支先跑 test；只有 push 到 main（或手动 Run workflow）
+# 且 test 通过后才跑 deploy。
+#
+# 需要的仓库 Secrets（仓库 Settings → Secrets and variables → Actions，
+# 由仓库所有者自己在 GitHub 网页上填，绝不要发到聊天里）：
+#   DEPLOY_HOST      首尔服务器公网 IP：8.220.194.80
+#   DEPLOY_USER      服务器 SSH 用户：admin
+#   DEPLOY_SSH_KEY   部署专用 SSH 私钥（只用于这台服务器，见 docs/cicd.md）
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Backend tests
+        run: |
+          cd backend
+          pip install -r requirements.txt
+          python -m pytest tests -q
+
+  deploy:
+    needs: test
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show deploy key fingerprint (debug, fingerprint only)
+        run: |
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > /tmp/deploy_key
+          chmod 600 /tmp/deploy_key
+          ssh-keygen -lf /tmp/deploy_key
+          rm -f /tmp/deploy_key
+
+      - name: Pack source (same excludes as local scripts/package.sh)
+        run: |
+          # NOTE: the archive must NOT be created inside the directory being
+          # archived: creating it changes '.' while tar reads it and tar dies
+          # with "file changed as we read it" (the --exclude does not help).
+          tar -czf ../canvasphere.tar.gz \
+            --exclude=canvasphere.tar.gz \
+            --exclude=.venv \
+            --exclude=backend/__pycache__ \
+            --exclude=.pytest_cache --exclude=.env --exclude=.git \
+            .
+          mv ../canvasphere.tar.gz ./canvasphere.tar.gz
+
+      - name: Upload tarball to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: 22
+          source: canvasphere.tar.gz
+          target: /opt/
+
+      - name: Extract, rebuild and verify on server
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: 22
+          script: |
+            set -e
+            cd /opt
+            # 包里是根目录级文件，解进已有的 /opt/canvasphere（数据库卷得以保留）
+            tar -xzf canvasphere.tar.gz -C canvasphere
+            cd canvasphere
+            # .env 在服务器上，不在包里，不会被覆盖
+            docker compose up -d --build
+            docker compose ps
+            curl -fsS http://localhost:8000/health
