@@ -18,3 +18,7 @@ id_rsa*
 # 打包产物与本地杂项
 *.tar.gz
 .DS_Store
+
+# Local dev DB & fallback object storage
+storage_data/
+*.db

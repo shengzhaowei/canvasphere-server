@@ -20,12 +20,15 @@ services:
       - LLM_MODEL=${LLM_MODEL}
       - E2B_API_KEY=${E2B_API_KEY:-}
       - DATABASE_URL=${DATABASE_URL:-postgresql://canvas:canvas@db:5432/canvas}
+      - AUTH_ALLOW_LEGACY_ROLE_HEADER=${AUTH_ALLOW_LEGACY_ROLE_HEADER:-false}
+      - LOCAL_STORAGE_DIR=${LOCAL_STORAGE_DIR:-/data/storage}
     volumes:
       # 本地 Docker 沙盒：把宿主机 docker.sock 挂进 api 容器，api 才能
       # 在宿主机上起一次性沙盒容器（兄弟容器，不是容器套容器）。
       # 注意：拿到 docker.sock 等于拿到宿主机 root 权限，只适用于
       # 单租户自用服务器；不要把这个挂载用在多租户环境。
       - /var/run/docker.sock:/var/run/docker.sock
+      - storage_data:/data/storage
     depends_on:
       db:
         condition: service_healthy
@@ -101,3 +104,4 @@ services:
 
 volumes:
   pgdata:
+  storage_data:

@@ -1,9 +1,10 @@
-"""FastAPI app (port 8000). Memory store + optional Postgres checkpoint.
+"""FastAPI app (port 8000). SQLAlchemy store + optional Postgres checkpoint.
 
 Mode: "live" when LLM_API_KEY is set, else "mock".
-Role enforcement is server-side: the X-Role header (default owner)
-is checked with permissions.check_permission on every mutating route;
-viewer (read-only) gets 403 on task creation / canvas writes / approve.
+Role enforcement is server-side: authenticated users are verified against
+project_members (strict JWT mode by default). When AUTH_ALLOW_LEGACY_ROLE_HEADER
+is explicitly enabled for transitional compatibility, unauthenticated requests
+fall back to the X-Role header.
 
 Events: SessionHost.events is the single source of truth. list_tasks
 merges host events into each task's `events` field, deduped.
@@ -17,41 +18,46 @@ from typing import Any, Optional
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-from app import agents, store  # noqa: E402
+from app import agents, auth, store  # noqa: E402
 from app.checkpoint import get_checkpointer  # noqa: E402
+from app.config import get_settings  # noqa: E402
+from app.db import db_kind, get_db, init_db  # noqa: E402
 from app.permissions import (  # noqa: E402
-    ALL_TOOLS, TIERS, assert_permission, check_permission,
-    get_policy, grant_tool, has_grant, require_approval,
+    ALL_TOOLS, assert_permission, check_permission,
+    get_policy, grant_tool, require_approval,
     set_tool_tier, tier_of,
 )
+from app.routers.auth import router as auth_router  # noqa: E402
+from app.routers.profile import router as profile_router  # noqa: E402
+from app.routers.projects import router as projects_router  # noqa: E402
+from app.routers.storage import router as storage_router  # noqa: E402
 from app.skills import is_skill_enabled, list_skills, load_skill, set_skill_enabled  # noqa: E402
 
+init_db()
+
 app = FastAPI(title="canvasphere backend")
-# CORS：前端在 5173、后端在 8000，是跨源调用。浏览器发请求前会先发
-# OPTIONS 预检；没有这个中间件时 FastAPI 对 OPTIONS 返回 405，
-# 前端 fetch 就会报 Failed to fetch（2026-11-26 线上实测）。
-# 允许的源从 CORS_ORIGINS（逗号分隔）读，默认含本机 + 线上 IP。
-_cors_origins = [
-    o.strip() for o in os.environ.get(
-        "CORS_ORIGINS",
-        "http://localhost:5173,http://127.0.0.1:5173,http://8.220.194.80:5173",
-    ).split(",") if o.strip()
-]
+_settings = get_settings()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_cors_origins,
+    allow_origins=list(_settings.cors_origins),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(auth_router)
+app.include_router(profile_router)
+app.include_router(storage_router)
+app.include_router(projects_router)
+
 session_host = None  # created lazily to avoid import-time side effects
 
 
@@ -68,10 +74,6 @@ def _mode() -> str:
     return "live" if os.environ.get("LLM_API_KEY") else "mock"
 
 
-def _role(x_role: Optional[str]) -> str:
-    return (x_role or "owner").strip().lower()
-
-
 def _require_role(role: str, tool: str) -> None:
     try:
         assert_permission(role, tool)
@@ -85,12 +87,6 @@ def _require_owner(role: str) -> None:
 
 
 def _task_view(task: dict[str, Any], host: Any = None) -> dict[str, Any]:
-    """Task dict with events merged from the single source (host log).
-
-    Same event appears once, in log order. Legacy task["events"] (if
-    any were stored before the single-source change) are merged in
-    too, deduped by (type, at, detail).
-    """
     out = dict(task)
     merged: list[dict[str, Any]] = []
     seen: set[tuple] = set()
@@ -109,13 +105,11 @@ def _task_view(task: dict[str, Any], host: Any = None) -> dict[str, Any]:
     if host is not None:
         for ev in host.events_for(task["task_id"]):
             _add(ev)
-    # Keep insertion (chronological) order; host log is already ordered.
     out["events"] = merged
     return out
 
 
 def _add_element_verbatim(project_id: str, el: dict[str, Any]) -> dict[str, Any]:
-    """Add the agent's complete element dict onto the canvas as-is."""
     return store.add_element(project_id, el["type"], el.get("x", 40),
                              el.get("y", 40), el.get("w", 320),
                              el.get("h", 180), el.get("text", ""))
@@ -131,11 +125,6 @@ def _maybe_add_element(project_id: str, result: dict[str, Any]) -> None:
 
 
 def _validate_skills(project_id: str, skills: Optional[list[str]]) -> list[dict[str, Any]]:
-    """Validate @skill mentions: each must exist and be enabled here.
-
-    Returns [{name, description}] for the agent prompt context.
-    Raises ValueError with a clear message on the first bad skill.
-    """
     out: list[dict[str, Any]] = []
     for name in (skills or []):
         try:
@@ -152,13 +141,6 @@ def _validate_skills(project_id: str, skills: Optional[list[str]]) -> list[dict[
 
 def _run_agent_for_task(project_id: str, task: dict[str, Any],
                         host: Any) -> dict[str, Any]:
-    """Run agents.run_task_sync for a task, recording success/failure.
-
-    On success returns the updated task (done / waiting_approval).
-    On exception the task stays failed with failure_reason +
-    auto_retry_stopped=True and the message '已停止自动重试'; the
-    exception is NOT retried automatically.
-    """
     skill_ctx = _validate_skills(project_id, task.get("skills") or [])
     try:
         result = agents.run_task_sync(task["prompt"], task.get("agent"),
@@ -204,14 +186,11 @@ def _public_task(task: dict[str, Any], host: Any = None) -> dict[str, Any]:
 
 
 # --- schemas --------------------------------------------------------------
-class ProjectCreate(BaseModel):
-    name: str
-
-
 class TaskCreate(BaseModel):
     prompt: str
     agent: Optional[str] = None
     skills: Optional[list[str]] = None
+    canvas_id: Optional[str] = None
 
 
 class ElementCreate(BaseModel):
@@ -221,6 +200,7 @@ class ElementCreate(BaseModel):
     w: float
     h: float
     text: str = ""
+    canvas_id: Optional[str] = None
 
 
 class SkillToggle(BaseModel):
@@ -238,28 +218,31 @@ class ApprovalGrantCreate(BaseModel):
     tool: str
 
 
-# --- routes ---------------------------------------------------------------
+# --- system routes --------------------------------------------------------
 @app.get("/health")
 def health() -> dict[str, Any]:
     _kind = get_checkpointer()[1]
-    return {"status": "ok", "mode": _mode(), "checkpointer": _kind}
+    settings = get_settings()
+    return {
+        "status": "ok",
+        "mode": _mode(),
+        "checkpointer": _kind,
+        "db": db_kind(),
+        "storage_backend": settings.effective_storage_backend,
+    }
 
 
-def _price(env_name: str, default: float) -> float:
-    try:
-        return float(os.environ.get(env_name, default))
-    except (TypeError, ValueError):
-        return float(default)
+@app.get("/api/runtime-config")
+def runtime_config() -> dict[str, Any]:
+    settings = get_settings()
+    return {
+        "system_timezone": settings.system_timezone,
+    }
 
 
 @app.get("/api/config")
 def get_config() -> dict[str, Any]:
-    """Model + placeholder pricing + sandbox config.
-
-    Prices are placeholders (LLM_PRICE_INPUT / LLM_PRICE_OUTPUT,
-    defaults 30/150 积分/百万Token); the response always says so.
-    base_url returns only the host -- never a key.
-    """
+    settings = get_settings()
     model = os.environ.get("LLM_MODEL", "gpt-4o-mini")
     raw_base = os.environ.get("LLM_BASE_URL", "")
     host = urlparse(raw_base).netloc if raw_base else ""
@@ -274,8 +257,8 @@ def get_config() -> dict[str, Any]:
         "base_url": host,
         "models": [{
             "name": model,
-            "input_price": _price("LLM_PRICE_INPUT", 30.0),
-            "output_price": _price("LLM_PRICE_OUTPUT", 150.0),
+            "input_price": settings.llm_price_input,
+            "output_price": settings.llm_price_output,
             "unit": "积分/百万Token",
         }],
         "sandbox": {
@@ -293,31 +276,15 @@ def get_config() -> dict[str, Any]:
     }
 
 
-@app.post("/api/projects", status_code=201)
-def create_project(body: ProjectCreate) -> dict[str, Any]:
-    try:
-        return store.create_project(body.name)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-
-
-@app.get("/api/projects")
-def list_projects() -> list[dict[str, Any]]:
-    return store.list_projects()
-
-
-@app.get("/api/projects/{project_id}")
-def get_project(project_id: str) -> dict[str, Any]:
-    p = store.get_project(project_id)
-    if p is None:
-        raise HTTPException(status_code=404, detail=f"project not found: {project_id}")
-    return p
-
-
+# --- approval policy & grants --------------------------------------------
 @app.get("/api/projects/{project_id}/approval-policy")
-def get_approval_policy(project_id: str) -> dict[str, Any]:
-    if store.get_project(project_id) is None:
-        raise HTTPException(status_code=404, detail=f"project not found: {project_id}")
+def get_approval_policy(
+    project_id: str,
+    request: Request,
+    x_role: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    auth.resolve_project_actor(project_id, request, db, x_role)
     policy = get_policy(project_id)
     policy["require_approval"] = {
         tool: require_approval(tool, project_id) for tool in ALL_TOOLS}
@@ -325,12 +292,15 @@ def get_approval_policy(project_id: str) -> dict[str, Any]:
 
 
 @app.post("/api/projects/{project_id}/approval-policy")
-def update_approval_policy(project_id: str, body: ApprovalPolicyUpdate,
-                           x_role: Optional[str] = Header(default=None)) -> dict[str, Any]:
-    role = _role(x_role)
+def update_approval_policy(
+    project_id: str,
+    body: ApprovalPolicyUpdate,
+    request: Request,
+    x_role: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    _user, role = auth.resolve_project_actor(project_id, request, db, x_role)
     _require_owner(role)
-    if store.get_project(project_id) is None:
-        raise HTTPException(status_code=404, detail=f"project not found: {project_id}")
     updates: dict[str, str] = {}
     if body.updates:
         updates.update(body.updates)
@@ -352,12 +322,15 @@ def update_approval_policy(project_id: str, body: ApprovalPolicyUpdate,
 
 
 @app.post("/api/projects/{project_id}/approval-grants", status_code=201)
-def create_approval_grant(project_id: str, body: ApprovalGrantCreate,
-                          x_role: Optional[str] = Header(default=None)) -> dict[str, Any]:
-    role = _role(x_role)
+def create_approval_grant(
+    project_id: str,
+    body: ApprovalGrantCreate,
+    request: Request,
+    x_role: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    _user, role = auth.resolve_project_actor(project_id, request, db, x_role)
     _require_role(role, "delegate_task")
-    if store.get_project(project_id) is None:
-        raise HTTPException(status_code=404, detail=f"project not found: {project_id}")
     try:
         grant_tool(project_id, body.tool)
     except ValueError as exc:
@@ -367,17 +340,23 @@ def create_approval_grant(project_id: str, body: ApprovalGrantCreate,
             "require_approval": require_approval(body.tool, project_id)}
 
 
+# --- tasks ----------------------------------------------------------------
 @app.post("/api/projects/{project_id}/tasks", status_code=201)
-def create_task(project_id: str, body: TaskCreate,
-                x_role: Optional[str] = Header(default=None)) -> dict[str, Any]:
-    role = _role(x_role)
+def create_task(
+    project_id: str,
+    body: TaskCreate,
+    request: Request,
+    x_role: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    _user, role = auth.resolve_project_actor(project_id, request, db, x_role)
     _require_role(role, "delegate_task")
-    if store.get_project(project_id) is None:
-        raise HTTPException(status_code=404, detail=f"project not found: {project_id}")
     try:
         _validate_skills(project_id, body.skills)
         task = store.create_task(project_id, body.prompt, body.agent,
-                                 skills=body.skills)
+                                 skills=body.skills, canvas_id=body.canvas_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     host = _host()
@@ -391,7 +370,13 @@ def create_task(project_id: str, body: TaskCreate,
 
 
 @app.get("/api/projects/{project_id}/tasks")
-def list_tasks(project_id: str) -> list[dict[str, Any]]:
+def list_tasks(
+    project_id: str,
+    request: Request,
+    x_role: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    auth.resolve_project_actor(project_id, request, db, x_role)
     try:
         tasks = store.list_tasks(project_id)
     except KeyError as exc:
@@ -401,15 +386,14 @@ def list_tasks(project_id: str) -> list[dict[str, Any]]:
 
 
 @app.post("/api/projects/{project_id}/tasks/{task_id}/retry")
-def retry_task(project_id: str, task_id: str,
-               x_role: Optional[str] = Header(default=None)) -> dict[str, Any]:
-    """Resume a failed task in the same session / same task.
-
-    Re-runs agents.run_task_sync. Success -> done/waiting_approval;
-    failure -> stays failed with an updated failure_reason. Retrying
-    a done task returns 409. request_id never changes.
-    """
-    role = _role(x_role)
+def retry_task(
+    project_id: str,
+    task_id: str,
+    request: Request,
+    x_role: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    _user, role = auth.resolve_project_actor(project_id, request, db, x_role)
     _require_role(role, "delegate_task")
     task = store.get_task(task_id)
     if task is None or task["project_id"] != project_id:
@@ -425,8 +409,6 @@ def retry_task(project_id: str, task_id: str,
         try:
             host.reset_for_retry(task_id)
         except ValueError:
-            # Machine not in failed state (e.g. fresh host after restart):
-            # re-create it so the retry can run.
             del host.machines[task_id]
             host.create(task_id)
     else:
@@ -440,9 +422,14 @@ def retry_task(project_id: str, task_id: str,
 
 
 @app.post("/api/projects/{project_id}/tasks/{task_id}/approve")
-def approve_task(project_id: str, task_id: str,
-                 x_role: Optional[str] = Header(default=None)) -> dict[str, Any]:
-    role = _role(x_role)
+def approve_task(
+    project_id: str,
+    task_id: str,
+    request: Request,
+    x_role: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    _user, role = auth.resolve_project_actor(project_id, request, db, x_role)
     _require_role(role, "delegate_task")
     task = store.get_task(task_id)
     if task is None or task["project_id"] != project_id:
@@ -451,7 +438,6 @@ def approve_task(project_id: str, task_id: str,
         raise HTTPException(
             status_code=409,
             detail=f"task is {task['status']}, not waiting_approval")
-    # Prefer the complete element stored at run time, verbatim.
     el = task.get("element")
     if isinstance(el, dict) and el.get("type"):
         try:
@@ -459,8 +445,6 @@ def approve_task(project_id: str, task_id: str,
         except Exception as exc:  # noqa: BLE001
             logger.warning("failed to add approved canvas element: %s", exc)
     else:
-        # Fallback only when no element was stored: rebuild from the
-        # agent type + result text (positions/sizes are defaults).
         logger.warning(
             "approve task %s: no stored element, rebuilding from "
             "agent %r + result text", task_id, task.get("agent"))
@@ -476,9 +460,14 @@ def approve_task(project_id: str, task_id: str,
 
 
 @app.post("/api/projects/{project_id}/tasks/{task_id}/reject")
-def reject_task(project_id: str, task_id: str,
-                x_role: Optional[str] = Header(default=None)) -> dict[str, Any]:
-    role = _role(x_role)
+def reject_task(
+    project_id: str,
+    task_id: str,
+    request: Request,
+    x_role: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    _user, role = auth.resolve_project_actor(project_id, request, db, x_role)
     _require_role(role, "delegate_task")
     task = store.get_task(task_id)
     if task is None or task["project_id"] != project_id:
@@ -486,8 +475,6 @@ def reject_task(project_id: str, task_id: str,
     if task["status"] not in ("waiting_approval", "running", "pending"):
         raise HTTPException(
             status_code=409, detail=f"task is {task['status']}, cannot reject")
-    # Mark rejected distinctly from a run failure, so the frontend can
-    # tell "rejected by a human" apart from "failed, auto-retry stopped".
     updated = store.update_task(
         task_id, status="failed",
         failure_reason="已驳回：人工拒绝",
@@ -499,28 +486,42 @@ def reject_task(project_id: str, task_id: str,
     return {"task_id": task_id, "status": updated["status"], "approved": False}
 
 
+# --- legacy default-canvas routes -----------------------------------------
 @app.get("/api/projects/{project_id}/canvas")
-def get_canvas(project_id: str) -> dict[str, Any]:
+def get_canvas(
+    project_id: str,
+    request: Request,
+    canvas_id: Optional[str] = None,
+    x_role: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    auth.resolve_project_actor(project_id, request, db, x_role)
     try:
-        return {"project_id": project_id, "elements": store.list_elements(project_id)}
+        return {"project_id": project_id, "elements": store.list_elements(project_id, canvas_id=canvas_id)}
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 
 
 @app.post("/api/projects/{project_id}/canvas/elements", status_code=201)
-def add_canvas_element(project_id: str, body: ElementCreate,
-                       x_role: Optional[str] = Header(default=None)) -> dict[str, Any]:
-    role = _role(x_role)
+def add_canvas_element(
+    project_id: str,
+    body: ElementCreate,
+    request: Request,
+    x_role: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    _user, role = auth.resolve_project_actor(project_id, request, db, x_role)
     _require_role(role, "add_node")
     try:
         return store.add_element(project_id, body.type, body.x, body.y,
-                                 body.w, body.h, body.text)
+                                 body.w, body.h, body.text, canvas_id=body.canvas_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+# --- skills ---------------------------------------------------------------
 @app.get("/api/skills")
 def get_skills(project_id: Optional[str] = None) -> list[dict[str, Any]]:
     out = []
@@ -534,9 +535,14 @@ def get_skills(project_id: Optional[str] = None) -> list[dict[str, Any]]:
 
 
 @app.post("/api/skills/{name}/toggle")
-def toggle_skill(name: str, body: SkillToggle,
-                 x_role: Optional[str] = Header(default=None)) -> dict[str, Any]:
-    role = _role(x_role)
+def toggle_skill(
+    name: str,
+    body: SkillToggle,
+    request: Request,
+    x_role: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    _user, role = auth.resolve_project_actor(body.project_id, request, db, x_role)
     if not check_permission(role, "delegate_task"):
         raise HTTPException(status_code=403, detail="viewer cannot toggle skills")
     try:
@@ -548,10 +554,6 @@ def toggle_skill(name: str, body: SkillToggle,
 
 
 # --- MCP over HTTP/SSE (streamable-http), same tools as stdio ------------
-# FastMCP requires its http app's lifespan to run in the parent app:
-# without it the StreamableHTTPSessionManager task group is never
-# initialised and every /mcp request 500s. Wire it onto the router
-# (FastAPI reads router.lifespan_context at lifespan startup).
 try:
     from app.mcp_server import mcp as _mcp  # noqa: E402
     _mcp_app = _mcp.http_app(path="/", transport="streamable-http")

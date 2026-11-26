@@ -6,8 +6,13 @@ langchain-openai
 langgraph-checkpoint-postgres
 psycopg[binary]
 sqlalchemy
+alembic
 pydantic
 python-dotenv
 httpx
 fastmcp
+pyjwt
+bcrypt
+python-multipart
+boto3
 pytest
