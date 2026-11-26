@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+langgraph
+langchain-core
+langchain-openai
+langgraph-checkpoint-postgres
+psycopg[binary]
+sqlalchemy
+pydantic
+python-dotenv
+httpx
+fastmcp
+pytest

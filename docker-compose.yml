@@ -1,0 +1,103 @@
+# Canvasphere Server —— docker-compose.yml
+# 后端专用：FastAPI + LangGraph 多智能体、y-websocket 协同、Postgres。
+# 前端不在这里，住在 canvasphere 仓库（Vercel 部署）。
+# 总内存上限：各服务 limits 之和 1g + 256m + 1g + 256m（redis，默认不开）= 约 2.25GB。
+# 部署目标固定为服务器上的 /opt/canvasphere（与旧版同一目录、同一 compose
+# 项目名，pgdata 卷得以保留，数据库不丢；旧版 web 容器会成为孤儿容器，
+# 仍在跑，待新前端上线后再手动停掉）。
+# 使用前：cp .env.example .env，填好真实值后再 up。
+
+services:
+  api:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - LLM_BASE_URL=${LLM_BASE_URL}
+      - LLM_API_KEY=${LLM_API_KEY}
+      - LLM_MODEL=${LLM_MODEL}
+      - E2B_API_KEY=${E2B_API_KEY:-}
+      - DATABASE_URL=${DATABASE_URL:-postgresql://canvas:canvas@db:5432/canvas}
+    volumes:
+      # 本地 Docker 沙盒：把宿主机 docker.sock 挂进 api 容器，api 才能
+      # 在宿主机上起一次性沙盒容器（兄弟容器，不是容器套容器）。
+      # 注意：拿到 docker.sock 等于拿到宿主机 root 权限，只适用于
+      # 单租户自用服务器；不要把这个挂载用在多租户环境。
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      # 要求后端镜像内装有 curl，且 FastAPI 提供 GET /health；否则请改用 python -c urllib 检查
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: "1.0"
+
+  yjs:
+    # 2026-11-25 infra 验证结论：旧写法（node:20-alpine + corepack + pnpm dlx
+    # y-websocket --port 1234 --host 0.0.0.0）有两个问题，已改掉：
+    # 1) y-websocket 的 bin/server.cjs 只读 HOST/PORT 环境变量，不解析
+    #    --port/--host 参数（实测：传参后仍打印 running at 'localhost' on
+    #    port 1234，12399 端口无响应），默认绑 localhost，容器外不可达；
+    # 2) pnpm dlx 每次启动都要联网拉包。改为 ./yjs/Dockerfile：构建期
+    #    npm install 锁定 y-websocket@2.1.0（与 frontend 已装版本一致），
+    #    启动用 HOST=0.0.0.0 PORT=1234 环境变量。未用 docker 验证构建。
+    build: ./yjs
+    environment:
+      - HOST=0.0.0.0
+      - PORT=1234
+    ports:
+      - "1234:1234"
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+          cpus: "0.5"
+
+  db:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      # 占位值：仅供本地开发，生产环境务必改成强密码
+      - POSTGRES_USER=canvas
+      - POSTGRES_PASSWORD=canvas
+      - POSTGRES_DB=canvas
+    command: ["postgres", "-c", "shared_buffers=256MB"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U canvas -d canvas"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: "1.0"
+
+  redis:
+    profiles:
+      - optional
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+          cpus: "0.5"
+
+volumes:
+  pgdata:
