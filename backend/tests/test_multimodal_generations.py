@@ -46,7 +46,7 @@ def test_catalog_protocol_profiles_image_and_midjourney_actions(strict_client):
     # Generate 2 images with GPT Image 2.6 -> attaches artifact to new image node + mock refunds credits
     r = strict_client.post(
         f"/api/projects/{pid}/canvases/{cid}/generations/image",
-        json={"model_key": "gpt-image-2.6-flare-ox", "prompt": "Cyberpunk rainy street", "count": 2, "output_format": "png"},
+        json={"model_key": "gpt-image-2.6-flare", "prompt": "Cyberpunk rainy street", "count": 2, "output_format": "png"},
         headers=h,
     )
     assert r.status_code == 201, r.text
