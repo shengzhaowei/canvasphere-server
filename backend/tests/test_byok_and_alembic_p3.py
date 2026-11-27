@@ -100,7 +100,7 @@ def test_byok_entitlement_encryption_channels_and_offerings_verify(strict_client
         "/api/user/model-platform/offerings",
         json={
             "channel_id": ch_data["id"],
-            "canonical_model_key": "seedream-5.0-pro-ox",
+            "canonical_model_key": "doubao-seedream-5-0-260128",
             "upstream_model_id": "ep-2026-seedream-5",
         },
         headers=h,
