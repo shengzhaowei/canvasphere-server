@@ -25,7 +25,7 @@ from app.realtime import event_bus, lease_manager, presence_manager
 
 router = APIRouter(tags=["canvas"])
 
-BASIC_OBJECT_TYPES = frozenset({"text", "rect", "line", "connector"})
+BASIC_OBJECT_TYPES = frozenset({"text", "rect", "line", "connector", "stroke"})
 CONTENT_NODE_TYPES = frozenset({"image", "video", "audio", "music", "document", "file"})
 ALL_OBJECT_TYPES = BASIC_OBJECT_TYPES | CONTENT_NODE_TYPES
 
@@ -56,6 +56,8 @@ class CanvasObjectCreate(BaseModel):
     to_object_id: Optional[str] = None
     to_anchor: Optional[str] = None
     media_type: Optional[str] = None
+    locked: bool = False
+    group_id: Optional[str] = None
 
 
 class CanvasObjectPatch(BaseModel):
@@ -76,6 +78,19 @@ class CanvasObjectPatch(BaseModel):
     to_object_id: Optional[str] = None
     to_anchor: Optional[str] = None
     media_type: Optional[str] = None
+    locked: Optional[bool] = None
+    group_id: Optional[str] = None
+
+
+class ObjectGroupRequest(BaseModel):
+    object_ids: list[str]
+    group_id: Optional[str] = None
+
+
+class ObjectReorderRequest(BaseModel):
+    action: Optional[str] = None  # bring_to_front | send_to_back | move_up | move_down
+    object_ids: list[str] = []
+    orders: Optional[list[dict[str, Any]]] = None  # [{"object_id": "...", "z_index": 5}]
 
 
 class ObjectDeletionRequest(BaseModel):
@@ -183,6 +198,8 @@ def serialize_canvas_object(obj: CanvasObject, lease: Optional[dict[str, Any]] =
         "from_anchor": obj.from_anchor,
         "to_object_id": obj.to_object_id,
         "to_anchor": obj.to_anchor,
+        "locked": bool(obj.locked),
+        "group_id": obj.group_id,
         "version": int(obj.version),
         "lease": lease,
         "properties": {
@@ -285,6 +302,8 @@ def create_canvas_object(
         to_object_id=body.to_object_id,
         to_anchor=body.to_anchor or ("left" if obj_type == "connector" else None),
         media_type=media_type,
+        locked=bool(body.locked),
+        group_id=body.group_id,
         version=1,
         created_at=now,
         updated_at=now,
@@ -323,6 +342,13 @@ def update_canvas_object(
 
     actor_id, _, _ = _actor_identity(user, role)
     lease_manager.check_writable(project_id, canvas_id, object_id, actor_id)
+
+    # Server-side lock enforcement: locked objects reject edits unless explicitly unlocking
+    if bool(obj.locked) and body.locked is not False:
+        raise HTTPException(
+            status_code=423,
+            detail={"code": "OBJECT_LOCKED", "message": f"object {object_id} is locked; unlock before editing"},
+        )
 
     if body.expected_version is not None and int(body.expected_version) != int(obj.version):
         cur_lease = lease_manager.get_active_lease(project_id, canvas_id, object_id)
@@ -379,6 +405,10 @@ def update_canvas_object(
         obj.to_anchor = body.to_anchor
     if body.media_type is not None:
         obj.media_type = body.media_type
+    if body.locked is not None:
+        obj.locked = bool(body.locked)
+    if body.group_id is not None:
+        obj.group_id = body.group_id.strip() or None
 
     now = utcnow()
     obj.version = int(obj.version) + 1
@@ -474,6 +504,11 @@ def delete_canvas_objects(
         obj = db.get(CanvasObject, oid)
         if obj is None or obj.project_id != project_id or obj.canvas_id != canvas_id or obj.deleted_at is not None:
             raise HTTPException(status_code=404, detail=f"object not found: {oid}")
+        if bool(obj.locked):
+            raise HTTPException(
+                status_code=423,
+                detail={"code": "OBJECT_LOCKED", "message": f"object {oid} is locked; unlock before deleting"},
+            )
         lease_manager.check_writable(project_id, canvas_id, oid, actor_id)
         if oid in expected_versions and int(expected_versions[oid]) != int(obj.version):
             cur_lease = lease_manager.get_active_lease(project_id, canvas_id, oid)
@@ -521,6 +556,140 @@ def delete_canvas_objects(
     lease_manager.release(project_id, canvas_id, all_deleted, actor_id)
     event_bus.publish(project_id, canvas_id, "object.deleted", {"object_ids": all_deleted}, actor_id=actor_id)
     return {"deleted_ids": list(deleted_ids), "cascaded_connector_ids": cascaded_ids}
+
+
+@router.post("/api/projects/{project_id}/canvases/{canvas_id}/objects/group")
+def group_canvas_objects(
+    project_id: str,
+    canvas_id: str,
+    body: ObjectGroupRequest,
+    request: Request,
+    x_role: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    user, role = auth.resolve_project_actor(project_id, request, db, x_role)
+    if not can_write(role):
+        raise HTTPException(status_code=403, detail="viewer cannot group objects")
+    _ensure_canvas(db, project_id, canvas_id)
+    if len(body.object_ids) < 2:
+        raise HTTPException(status_code=400, detail="at least 2 object_ids are required to form a group")
+
+    gid = (body.group_id or "").strip() or new_prefixed_id("grp")
+    now = utcnow()
+    updated_objs: list[dict[str, Any]] = []
+    for oid in body.object_ids:
+        obj = db.get(CanvasObject, oid)
+        if obj is None or obj.canvas_id != canvas_id or obj.deleted_at is not None:
+            raise HTTPException(status_code=404, detail=f"object not found: {oid}")
+        obj.group_id = gid
+        obj.version = int(obj.version) + 1
+        obj.updated_at = now
+        db.add(obj)
+        updated_objs.append(serialize_canvas_object(obj))
+    db.commit()
+    actor_id, _, _ = _actor_identity(user, role)
+    event_bus.publish(project_id, canvas_id, "object.grouped", {"group_id": gid, "object_ids": body.object_ids}, actor_id=actor_id)
+    return {"group_id": gid, "objects": updated_objs}
+
+
+@router.post("/api/projects/{project_id}/canvases/{canvas_id}/objects/ungroup")
+def ungroup_canvas_objects(
+    project_id: str,
+    canvas_id: str,
+    body: ObjectGroupRequest,
+    request: Request,
+    x_role: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    user, role = auth.resolve_project_actor(project_id, request, db, x_role)
+    if not can_write(role):
+        raise HTTPException(status_code=403, detail="viewer cannot ungroup objects")
+    _ensure_canvas(db, project_id, canvas_id)
+    now = utcnow()
+    if body.group_id:
+        targets = db.scalars(
+            select(CanvasObject).where(
+                CanvasObject.canvas_id == canvas_id,
+                CanvasObject.group_id == body.group_id,
+                CanvasObject.deleted_at.is_(None),
+            )
+        ).all()
+    else:
+        targets = [
+            o for oid in body.object_ids
+            if (o := db.get(CanvasObject, oid)) is not None and o.canvas_id == canvas_id and o.deleted_at is None
+        ]
+    ungrouped_ids: list[str] = []
+    for obj in targets:
+        obj.group_id = None
+        obj.version = int(obj.version) + 1
+        obj.updated_at = now
+        db.add(obj)
+        ungrouped_ids.append(obj.id)
+    db.commit()
+    actor_id, _, _ = _actor_identity(user, role)
+    event_bus.publish(project_id, canvas_id, "object.ungrouped", {"object_ids": ungrouped_ids}, actor_id=actor_id)
+    return {"ungrouped_ids": ungrouped_ids}
+
+
+@router.post("/api/projects/{project_id}/canvases/{canvas_id}/objects/reorder")
+def reorder_canvas_objects(
+    project_id: str,
+    canvas_id: str,
+    body: ObjectReorderRequest,
+    request: Request,
+    x_role: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    user, role = auth.resolve_project_actor(project_id, request, db, x_role)
+    if not can_write(role):
+        raise HTTPException(status_code=403, detail="viewer cannot reorder objects")
+    _ensure_canvas(db, project_id, canvas_id)
+    all_objs = db.scalars(
+        select(CanvasObject).where(CanvasObject.canvas_id == canvas_id, CanvasObject.deleted_at.is_(None))
+    ).all()
+    now = utcnow()
+    updated: list[dict[str, Any]] = []
+    if body.orders:
+        by_id = {o.id: o for o in all_objs}
+        for item in body.orders:
+            obj = by_id.get(item.get("object_id", ""))
+            if obj is None:
+                continue
+            obj.z_index = int(item.get("z_index", obj.z_index))
+            obj.version = int(obj.version) + 1
+            obj.updated_at = now
+            db.add(obj)
+            updated.append(serialize_canvas_object(obj))
+    elif body.action and body.object_ids:
+        act = body.action.strip().lower()
+        if act not in ("bring_to_front", "send_to_back", "move_up", "move_down"):
+            raise HTTPException(status_code=400, detail=f"unsupported reorder action: {body.action}")
+        max_z = max((int(o.z_index) for o in all_objs), default=0)
+        min_z = min((int(o.z_index) for o in all_objs), default=0)
+        by_id = {o.id: o for o in all_objs}
+        for idx, oid in enumerate(body.object_ids):
+            obj = by_id.get(oid)
+            if obj is None:
+                raise HTTPException(status_code=404, detail=f"object not found: {oid}")
+            if act == "bring_to_front":
+                obj.z_index = max_z + 1 + idx
+            elif act == "send_to_back":
+                obj.z_index = min_z - 1 - idx
+            elif act == "move_up":
+                obj.z_index = int(obj.z_index) + 1
+            elif act == "move_down":
+                obj.z_index = int(obj.z_index) - 1
+            obj.version = int(obj.version) + 1
+            obj.updated_at = now
+            db.add(obj)
+            updated.append(serialize_canvas_object(obj))
+    else:
+        raise HTTPException(status_code=400, detail="provide action+object_ids or orders")
+    db.commit()
+    actor_id, _, _ = _actor_identity(user, role)
+    event_bus.publish(project_id, canvas_id, "object.reordered", {"count": len(updated)}, actor_id=actor_id)
+    return {"objects": updated, "total": len(updated)}
 
 
 # --- object leases --------------------------------------------------------

@@ -102,6 +102,7 @@ class Project(Base):
     id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_prefixed_id("prj"))
     workspace_id: Mapped[str] = mapped_column(String(40), unique=True, nullable=False, default=lambda: new_prefixed_id("wsp"))
     name: Mapped[str] = mapped_column(String(128), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
     status: Mapped[str] = mapped_column(String(24), default="active", nullable=False, index=True)
     cover_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     cover_type: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
@@ -175,6 +176,8 @@ class CanvasObject(Base):
     to_object_id: Mapped[Optional[str]] = mapped_column(String(40), nullable=True, index=True)
     to_anchor: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     media_type: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, index=True)
+    locked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    group_id: Mapped[Optional[str]] = mapped_column(String(40), nullable=True, index=True)
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
@@ -631,3 +634,52 @@ class ByokOffering(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+# --- Phase P9: Canvas Snapshots, Comments & Public Read-Only Shares -------
+class CanvasSnapshot(Base):
+    __tablename__ = "canvas_snapshots"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_prefixed_id("snp"))
+    project_id: Mapped[str] = mapped_column(String(40), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    canvas_id: Mapped[str] = mapped_column(String(40), ForeignKey("canvases.id", ondelete="CASCADE"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_by: Mapped[Optional[str]] = mapped_column(String(40), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    object_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    objects_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False, index=True)
+
+
+class CanvasComment(Base):
+    __tablename__ = "canvas_comments"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_prefixed_id("cmt"))
+    project_id: Mapped[str] = mapped_column(String(40), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    canvas_id: Mapped[str] = mapped_column(String(40), ForeignKey("canvases.id", ondelete="CASCADE"), nullable=False, index=True)
+    object_id: Mapped[Optional[str]] = mapped_column(String(40), ForeignKey("canvas_objects.id", ondelete="SET NULL"), nullable=True, index=True)
+    parent_id: Mapped[Optional[str]] = mapped_column(String(40), nullable=True, index=True)
+    author_user_id: Mapped[Optional[str]] = mapped_column(String(40), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    author_name: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    anchor_x: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    anchor_y: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    resolved: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    resolved_by: Mapped[Optional[str]] = mapped_column(String(40), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class CanvasPublicShare(Base):
+    __tablename__ = "canvas_public_shares"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_prefixed_id("shr"))
+    project_id: Mapped[str] = mapped_column(String(40), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    canvas_id: Mapped[str] = mapped_column(String(40), ForeignKey("canvases.id", ondelete="CASCADE"), nullable=False, index=True)
+    token: Mapped[str] = mapped_column(String(96), unique=True, nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(128), default="", nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_by: Mapped[Optional[str]] = mapped_column(String(40), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)

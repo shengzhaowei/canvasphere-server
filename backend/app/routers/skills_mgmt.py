@@ -16,6 +16,7 @@ from app.config import get_settings
 from app.db import get_db
 from app.models import ProjectInstalledSkill, User, UserSkill, new_prefixed_id, utcnow
 from app.permissions import can_write
+from app.skills_seed import ensure_builtin_skills_seeded
 
 router = APIRouter(tags=["skills_mgmt"])
 
@@ -98,6 +99,7 @@ def list_user_skills(
     user: User = Depends(auth.get_current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    ensure_builtin_skills_seeded(db)
     stmt = select(UserSkill).where(
         or_(UserSkill.owner_user_id == user.id, UserSkill.is_builtin.is_(True))
     )

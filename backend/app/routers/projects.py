@@ -30,10 +30,12 @@ router = APIRouter(tags=["projects"])
 # --- schemas --------------------------------------------------------------
 class ProjectCreate(BaseModel):
     name: str
+    description: str = ""
 
 
 class ProjectUpdate(BaseModel):
-    name: str
+    name: Optional[str] = None
+    description: Optional[str] = None
 
 
 class CoverUploadUrlRequest(BaseModel):
@@ -122,6 +124,7 @@ def _project_detail(
         "project_id": proj.id,
         "workspace_id": proj.workspace_id,
         "name": proj.name,
+        "description": proj.description or "",
         "status": proj.status,
         "cover_url": proj.cover_url,
         "cover_type": proj.cover_type,
@@ -171,6 +174,10 @@ def create_project(
         raise HTTPException(status_code=400, detail=str(exc))
     proj = db.get(Project, created["id"])
     assert proj is not None
+    if body.description and body.description.strip():
+        proj.description = body.description.strip()[:500]
+        db.add(proj)
+        db.commit()
     return _project_detail(db, proj, role="owner")
 
 
@@ -293,13 +300,18 @@ def rename_project(
     _user, role = auth.resolve_project_actor(project_id, request, db, x_role)
     if not can_write(role):
         raise HTTPException(status_code=403, detail="viewer cannot rename project")
-    name = (body.name or "").strip()
-    if not name or len(name) > 128:
-        raise HTTPException(status_code=400, detail="project name must be 1..128 characters")
+    if body.name is None and body.description is None:
+        raise HTTPException(status_code=400, detail="provide name or description")
     proj = db.get(Project, project_id)
     assert proj is not None
     now = utcnow()
-    proj.name = name
+    if body.name is not None:
+        name = body.name.strip()
+        if not name or len(name) > 128:
+            raise HTTPException(status_code=400, detail="project name must be 1..128 characters")
+        proj.name = name
+    if body.description is not None:
+        proj.description = body.description.strip()[:500]
     proj.updated_at = now
     proj.last_activity_at = now
     db.add(proj)

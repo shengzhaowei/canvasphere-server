@@ -40,12 +40,14 @@ from app.permissions import (  # noqa: E402
     set_tool_tier, tier_of,
 )
 from app.rate_cards_seed import ensure_rate_cards_seeded  # noqa: E402
+from app.skills_seed import ensure_builtin_skills_seeded  # noqa: E402
 from app.routers.admin import router as admin_router  # noqa: E402
 from app.routers.asset_tools import router as asset_tools_router  # noqa: E402
 from app.routers.auth import router as auth_router  # noqa: E402
 from app.routers.billing import router as billing_router  # noqa: E402
 from app.routers.byok import router as byok_router  # noqa: E402
 from app.routers.canvas import router as canvas_router  # noqa: E402
+from app.routers.canvas_collab import router as canvas_collab_router  # noqa: E402
 from app.routers.generations import router as generations_router  # noqa: E402
 from app.routers.mcp_mgmt import router as mcp_mgmt_router  # noqa: E402
 from app.routers.profile import router as profile_router  # noqa: E402
@@ -61,6 +63,7 @@ configure_logging()
 init_db()
 with session_scope() as _seed_db:
     ensure_rate_cards_seeded(_seed_db)
+    ensure_builtin_skills_seeded(_seed_db)
 
 app = FastAPI(title="canvasphere backend")
 _settings = get_settings()
@@ -77,6 +80,7 @@ app.include_router(profile_router)
 app.include_router(storage_router)
 app.include_router(projects_router)
 app.include_router(canvas_router)
+app.include_router(canvas_collab_router)
 app.include_router(billing_router)
 app.include_router(generations_router)
 app.include_router(studio_router)
