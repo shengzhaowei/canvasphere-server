@@ -26,14 +26,14 @@ def test_adapter_v1_url_normalization_and_live_models_filter(strict_client, monk
     img_adapter = OpenAIImageAdapter()
     u1, _ = img_adapter.build_request(
         base_url="https://openlux.example.com",
-        model_id="gpt-image-2.6-flare-ox",
+        model_id="gpt-image-2.6-flare",
         mode="imagine",
         prompt="cat",
         params={"count": 1},
     )
     u2, _ = img_adapter.build_request(
         base_url="https://openlux.example.com/v1/",
-        model_id="gpt-image-2.6-flare-ox",
+        model_id="gpt-image-2.6-flare",
         mode="imagine",
         prompt="cat",
         params={"count": 1},
@@ -65,16 +65,16 @@ def test_adapter_v1_url_normalization_and_live_models_filter(strict_client, monk
     live_models = r_live.json()["models"]
     assert len(live_models) > 0
     assert all(m["live_configured"] is True for m in live_models)
-    assert any(m["model_key"] == "gpt-image-2.6-flare-ox" for m in live_models)
+    assert any(m["model_key"] == "gpt-image-2.6-flare" for m in live_models)
 
     # sync-live-models CLI restricts enabled rate cards to only the verified key(s)
-    synced = cli.cmd_sync_live_models(enable_keys=["gpt-image-2.6-flare-ox"])
-    assert synced["enabled_keys"] == ["gpt-image-2.6-flare-ox"]
+    synced = cli.cmd_sync_live_models(enable_keys=["gpt-image-2.6-flare"])
+    assert synced["enabled_keys"] == ["gpt-image-2.6-flare"]
     assert synced["disabled_count"] >= 60
 
     r_after = strict_client.get("/api/model-platform/models")
     assert r_after.status_code == 200
-    assert [m["model_key"] for m in r_after.json()["models"]] == ["gpt-image-2.6-flare-ox"]
+    assert [m["model_key"] for m in r_after.json()["models"]] == ["gpt-image-2.6-flare"]
 
 
 def test_first_login_ensure_default_project_idempotent(strict_client):
