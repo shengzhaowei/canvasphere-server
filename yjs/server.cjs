@@ -10,7 +10,7 @@
  */
 const http = require("http");
 const crypto = require("crypto");
-const { WebSocketServer } = require("ws");
+const WebSocket = require("ws");
 const { setupWSConnection } = require("y-websocket/bin/utils");
 
 const HOST = process.env.HOST || "0.0.0.0";
@@ -65,7 +65,7 @@ const server = http.createServer((req, res) => {
   res.end("canvasphere yjs server\n");
 });
 
-const wss = new WebSocketServer({ noServer: true });
+const wss = new WebSocket.Server({ noServer: true });
 
 wss.on("connection", (ws, req) => {
   setupWSConnection(ws, req);

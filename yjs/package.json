@@ -1,1 +1,1 @@
-{"dependencies":{"y-websocket":"2.1.0"},"description":"Standalone y-websocket server for Canvasphere (version pinned to match frontend's installed y-websocket 2.1.0)","name":"canvasphere-yjs","private":true,"version":"0.1.0"}
+{"dependencies":{"ws":"^8.18.0","y-websocket":"2.1.0"},"description":"Standalone y-websocket server for Canvasphere (version pinned to match frontend's installed y-websocket 2.1.0)","name":"canvasphere-yjs","private":true,"version":"0.1.0"}

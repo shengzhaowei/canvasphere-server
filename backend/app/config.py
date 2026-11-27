@@ -43,6 +43,7 @@ class Settings:
     # Runtime
     system_timezone: str
     app_base_url: str
+    frontend_url: str
     cors_origins: tuple[str, ...]
 
     # Database
@@ -164,6 +165,7 @@ def get_settings() -> Settings:
     return Settings(
         system_timezone=os.environ.get("SYSTEM_TIMEZONE", "Asia/Shanghai"),
         app_base_url=app_base_url,
+        frontend_url=os.environ.get("FRONTEND_URL", "https://canvasphere-three.vercel.app").strip().rstrip("/"),
         cors_origins=cors_origins,
         database_url=os.environ.get("DATABASE_URL", "").strip(),
         jwt_secret=jwt_secret,

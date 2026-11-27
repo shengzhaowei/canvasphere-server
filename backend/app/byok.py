@@ -20,7 +20,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.model_platform import PROTOCOL_PROFILES
+from app.protocol_profiles import PROTOCOL_PROFILES
 from app.models import ByokChannel, ByokEntitlement, ByokOffering, RateCard, new_prefixed_id, utcnow
 from app.rate_cards_seed import ensure_rate_cards_seeded
 

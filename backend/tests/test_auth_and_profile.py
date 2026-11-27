@@ -1,9 +1,10 @@
 """P0 tests: email/password auth, dual-token refresh, logout-all, OAuth, profile & avatar."""
 from __future__ import annotations
 
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from app import auth
+from app.config import get_settings
 
 
 def _register_user(client, email: str, password: str = "StrongPass123!", name: str = "Alice"):
@@ -19,6 +20,20 @@ def _register_user(client, email: str, password: str = "StrongPass123!", name: s
     })
     assert r.status_code == 201, r.text
     return r.json()
+
+
+def _oauth_callback_fragment(client, url):
+    """GET an OAuth callback without following the redirect and return the
+    parsed URL fragment. The callback 302s to {FRONTEND_URL}/auth/callback
+    with tokens (login) or the bind result (bind) in the fragment; following
+    the redirect would leave the API (the frontend route does not exist here)
+    and come back 404."""
+    r = client.get(url, follow_redirects=False)
+    assert r.status_code == 302, r.text
+    parsed = urlparse(r.headers["location"])
+    frontend = get_settings().frontend_url
+    assert f"{parsed.scheme}://{parsed.netloc}{parsed.path}" == f"{frontend}/auth/callback", r.headers["location"]
+    return parse_qs(parsed.fragment)
 
 
 def test_strict_mode_rejects_unauthenticated_requests(strict_client):
@@ -76,16 +91,23 @@ def test_oauth_login_multibind_email_password_and_lockout_protection(strict_clie
 
     monkeypatch.setattr(auth, "exchange_oauth_code", fake_exchange)
 
-    # Login via GitHub (no email returned)
+    # Login via GitHub (no email returned). The callback now 302-redirects to
+    # the frontend /auth/callback page with tokens in the URL fragment instead
+    # of returning raw JSON.
     r = strict_client.get("/api/auth/oauth/github/authorize?mode=login")
     assert r.status_code == 200
     state = r.json()["state"]
-    r = strict_client.get(f"/api/auth/oauth/github/callback?code=abc&state={state}")
-    assert r.status_code == 200
-    token = r.json()["access_token"]
+    frag = _oauth_callback_fragment(strict_client, f"/api/auth/oauth/github/callback?code=abc&state={state}")
+    assert frag["provider"] == ["github"]
+    assert frag["token_type"] == ["Bearer"]
+    assert frag["expires_in"] == ["7200"]
+    assert frag["refresh_token"][0]
+    token = frag["access_token"][0]
     headers = {"Authorization": f"Bearer {token}"}
-    assert r.json()["user"]["has_local_credential"] is False
-    assert r.json()["user"]["email_verified"] is False
+    r = strict_client.get("/api/user/profile", headers=headers)
+    assert r.status_code == 200
+    assert r.json()["has_local_credential"] is False
+    assert r.json()["email_verified"] is False
 
     # Cannot set password before verifying an email
     r = strict_client.post("/api/user/profile/password", json={"new_password": "Password123!"}, headers=headers)
@@ -98,9 +120,10 @@ def test_oauth_login_multibind_email_password_and_lockout_protection(strict_clie
     # Bind Linux DO OAuth
     r = strict_client.get("/api/auth/oauth/linuxdo/authorize?mode=bind", headers=headers)
     assert r.status_code == 200
-    r = strict_client.get(f"/api/auth/oauth/linuxdo/callback?code=xyz&state={r.json()['state']}")
-    assert r.status_code == 200
-    assert r.json()["bound"] is True
+    bind_state = r.json()["state"]
+    frag = _oauth_callback_fragment(strict_client, f"/api/auth/oauth/linuxdo/callback?code=xyz&state={bind_state}")
+    assert frag["bound"] == ["true"]
+    assert frag["provider"] == ["linuxdo"]
 
     # Check bindings list includes all 3 available providers
     r = strict_client.get("/api/user/profile/oauth/bindings", headers=headers)
