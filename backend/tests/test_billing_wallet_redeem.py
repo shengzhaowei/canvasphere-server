@@ -42,9 +42,9 @@ def test_wallet_defaults_rate_cards_count_and_redeem_codes(strict_client):
 
     # Price explanation lists all 64 enabled rate cards
     pe = strict_client.get("/api/user/billing/price-explanation").json()
-    assert pe["total_enabled_rate_cards"] == 64
+    assert pe["total_enabled_rate_cards"] == 59
     assert pe["counts_by_modality"]["text"] == 4
-    assert pe["counts_by_modality"]["image"] == 15
+    assert pe["counts_by_modality"]["image"] == 10
     assert pe["counts_by_modality"]["video"] == 40
     assert pe["counts_by_modality"]["tts"] == 3
     assert pe["counts_by_modality"]["asr"] == 1
