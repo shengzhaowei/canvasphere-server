@@ -123,6 +123,22 @@ class Settings:
     rate_limit_email_code_per_min: int
     orphan_upload_max_age_hours: int
 
+    # P5: MCP HTTP OAuth enforcement, Webhooks & 6 Vendor Adapters
+    mcp_require_oauth_token: bool
+    provider_webhook_secret: str
+    openai_image_base_url: str
+    openai_image_api_key: str
+    ark_base_url: str
+    ark_api_key: str
+    mj_base_url: str
+    mj_api_key: str
+    seedance_base_url: str
+    seedance_api_key: str
+    minimax_base_url: str
+    minimax_api_key: str
+    suno_base_url: str
+    suno_api_key: str
+
     @property
     def effective_storage_backend(self) -> str:
         mode = self.storage_backend.strip().lower()
@@ -204,4 +220,18 @@ def get_settings() -> Settings:
         rate_limit_login_per_min=_int_env("RATE_LIMIT_LOGIN_PER_MIN", 20),
         rate_limit_email_code_per_min=_int_env("RATE_LIMIT_EMAIL_CODE_PER_MIN", 5),
         orphan_upload_max_age_hours=_int_env("ORPHAN_UPLOAD_MAX_AGE_HOURS", 24),
+        mcp_require_oauth_token=_bool_env("MCP_REQUIRE_OAUTH_TOKEN", True),
+        provider_webhook_secret=os.environ.get("PROVIDER_WEBHOOK_SECRET", "").strip(),
+        openai_image_base_url=os.environ.get("OPENAI_IMAGE_BASE_URL", "https://api.openai.com").strip().rstrip("/"),
+        openai_image_api_key=os.environ.get("OPENAI_IMAGE_API_KEY", "").strip(),
+        ark_base_url=os.environ.get("ARK_BASE_URL", "https://ark.cn-beijing.volces.com").strip().rstrip("/"),
+        ark_api_key=os.environ.get("ARK_API_KEY", "").strip(),
+        mj_base_url=os.environ.get("MJ_BASE_URL", "").strip().rstrip("/"),
+        mj_api_key=os.environ.get("MJ_API_KEY", "").strip(),
+        seedance_base_url=os.environ.get("SEEDANCE_BASE_URL", "").strip().rstrip("/"),
+        seedance_api_key=os.environ.get("SEEDANCE_API_KEY", "").strip(),
+        minimax_base_url=os.environ.get("MINIMAX_BASE_URL", "https://api.minimax.chat").strip().rstrip("/"),
+        minimax_api_key=os.environ.get("MINIMAX_API_KEY", "").strip(),
+        suno_base_url=os.environ.get("SUNO_BASE_URL", "").strip().rstrip("/"),
+        suno_api_key=os.environ.get("SUNO_API_KEY", "").strip(),
     )

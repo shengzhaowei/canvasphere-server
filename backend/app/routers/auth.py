@@ -42,6 +42,12 @@ class LogoutRequest(BaseModel):
     refresh_token: Optional[str] = None
 
 
+class PasswordResetRequest(BaseModel):
+    email: str
+    code: str
+    new_password: str
+
+
 @router.post("/email/send-code")
 def send_code(
     body: EmailSendCodeRequest,
@@ -149,6 +155,32 @@ def logout_all(
     response.delete_cookie("access_token", path="/")
     response.delete_cookie("refresh_token", path="/api/auth")
     return {"logged_out_all": True, "user_id": user.id}
+
+
+@router.post("/password/reset")
+def reset_password(
+    body: PasswordResetRequest,
+    response: Response,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    settings = get_settings()
+    norm_email = (body.email or "").strip().lower()
+    rate_limiter.check("password_reset", norm_email or "unknown", settings.rate_limit_email_code_per_min, 60)
+    user = db.scalar(select(User).where(User.email == norm_email))
+    if user is None or not user.is_active:
+        raise HTTPException(status_code=404, detail="account not found")
+    auth.verify_and_consume_email_code(db, norm_email, "reset_password", body.code)
+    try:
+        user.password_hash = auth.hash_password(body.new_password)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    user.email_verified = True
+    db.add(user)
+    # Revoke all existing sessions across every device immediately
+    auth.revoke_all_user_sessions(db, user)
+    response.delete_cookie("access_token", path="/")
+    response.delete_cookie("refresh_token", path="/api/auth")
+    return {"reset": True, "user_id": user.id}
 
 
 @router.get("/oauth/{provider}/authorize")

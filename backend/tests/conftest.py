@@ -31,6 +31,7 @@ _P0_STRICT_MODULES = {
     "test_mcp_dual_oauth_dcr.py",
     "test_byok_and_alembic_p3.py",
     "test_p4_production_hardening.py",
+    "test_p5_security_admin_providers.py",
 }
 
 

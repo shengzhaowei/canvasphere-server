@@ -24,8 +24,12 @@ def _make_user(client, email: str, name: str):
     return r.json()["user"]["user_id"], {"Authorization": f"Bearer {r.json()['access_token']}"}
 
 
-def _mcp_init_and_list_tools(client: TestClient, mount_path: str) -> set[str]:
-    headers = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
+def _mcp_init_and_list_tools(client: TestClient, mount_path: str, bearer_token: str) -> set[str]:
+    headers = {
+        "Accept": "application/json, text/event-stream",
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {bearer_token}",
+    }
     r = client.post(
         mount_path,
         headers=headers,
@@ -137,7 +141,34 @@ def test_mcp_oauth_dcr_pkce_flow_scope_enforcement_and_revocation(strict_client)
 
 def test_dual_mcp_streamable_http_endpoints_list_distinct_tools():
     with TestClient(app) as client:
-        canvas_tools = _mcp_init_and_list_tools(client, "/mcp/canvas/")
-        pecan_tools = _mcp_init_and_list_tools(client, "/mcp/pecan/")
+        # Unauthenticated requests to /mcp/canvas/ and /mcp/pecan/ must return 401 + WWW-Authenticate
+        unauth = client.post("/mcp/canvas/", json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+        assert unauth.status_code == 401
+        assert "resource_metadata=" in unauth.headers.get("www-authenticate", "")
+
+        _uid, h = _make_user(client, "mcp_dual@example.com", "DualUser")
+        pid = client.post("/api/projects", json={"name": "Dual MCP"}, headers=h).json()["id"]
+        cid = client.post(
+            "/api/mcp/oauth/register",
+            json={"client_name": "DualTest", "redirect_uris": ["http://127.0.0.1:8888/cb"]},
+        ).json()["client_id"]
+        code = client.post(
+            "/api/mcp/oauth/authorize",
+            json={
+                "client_id": cid,
+                "project_id": pid,
+                "scopes": ["canvas:read", "canvas:write", "pecan:delegate"],
+                "redirect_uri": "http://127.0.0.1:8888/cb",
+                "server_type": "both",
+            },
+            headers=h,
+        ).json()["code"]
+        token = client.post(
+            "/api/mcp/oauth/token",
+            json={"client_id": cid, "code": code, "redirect_uri": "http://127.0.0.1:8888/cb"},
+        ).json()["access_token"]
+
+        canvas_tools = _mcp_init_and_list_tools(client, "/mcp/canvas/", token)
+        pecan_tools = _mcp_init_and_list_tools(client, "/mcp/pecan/", token)
         assert {"pecan_list_projects", "pecan_canvas_read", "directory_list", "pecan_canvas_add_node"}.issubset(canvas_tools)
         assert {"pecan_delegate_task", "pecan_get_run_status"}.issubset(pecan_tools)

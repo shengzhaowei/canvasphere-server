@@ -38,6 +38,7 @@ from app.permissions import (  # noqa: E402
     set_tool_tier, tier_of,
 )
 from app.rate_cards_seed import ensure_rate_cards_seeded  # noqa: E402
+from app.routers.admin import router as admin_router  # noqa: E402
 from app.routers.asset_tools import router as asset_tools_router  # noqa: E402
 from app.routers.auth import router as auth_router  # noqa: E402
 from app.routers.billing import router as billing_router  # noqa: E402
@@ -51,6 +52,7 @@ from app.routers.sandbox import router as sandbox_router  # noqa: E402
 from app.routers.skills_mgmt import router as skills_mgmt_router  # noqa: E402
 from app.routers.storage import router as storage_router  # noqa: E402
 from app.routers.studio import router as studio_router  # noqa: E402
+from app.routers.webhooks import router as webhooks_router  # noqa: E402
 from app.skills import is_skill_enabled, list_skills, load_skill, set_skill_enabled  # noqa: E402
 
 init_db()
@@ -79,6 +81,8 @@ app.include_router(asset_tools_router)
 app.include_router(skills_mgmt_router)
 app.include_router(mcp_mgmt_router)
 app.include_router(byok_router)
+app.include_router(admin_router)
+app.include_router(webhooks_router)
 
 session_host = None  # created lazily to avoid import-time side effects
 
@@ -580,6 +584,7 @@ def toggle_skill(
 
 # --- MCP over HTTP/SSE (streamable-http): /mcp/canvas, /mcp/pecan & legacy /mcp
 try:
+    from app.mcp_auth_middleware import McpOAuthMiddleware  # noqa: E402
     from app.mcp_server import mcp as _mcp, mcp_canvas as _mcp_canvas, mcp_pecan as _mcp_pecan  # noqa: E402
 
     _mcp_canvas_app = _mcp_canvas.http_app(path="/", transport="streamable-http")
@@ -595,10 +600,10 @@ try:
             yield
 
     app.router.lifespan_context = _combined_mcp_lifespan
-    # Specific subpaths must be mounted before /mcp
-    app.mount("/mcp/canvas", _mcp_canvas_app)
-    app.mount("/mcp/pecan", _mcp_pecan_app)
+    # Specific subpaths must be mounted before /mcp; wrap dual Pecan endpoints with OAuth middleware
+    app.mount("/mcp/canvas", McpOAuthMiddleware(_mcp_canvas_app, server_type="canvas"))
+    app.mount("/mcp/pecan", McpOAuthMiddleware(_mcp_pecan_app, server_type="pecan"))
     app.mount("/mcp", _mcp_app)
-    logger.info("MCP streamable-http mounted at /mcp/canvas, /mcp/pecan, and /mcp")
+    logger.info("MCP streamable-http mounted at /mcp/canvas (OAuth), /mcp/pecan (OAuth), and /mcp")
 except Exception as exc:  # noqa: BLE001 - stdio MCP still works
     logger.warning("MCP http transport unavailable (%s); stdio only", exc)

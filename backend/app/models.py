@@ -391,6 +391,8 @@ class GenerationJob(Base):
     status: Mapped[str] = mapped_column(String(24), default="queued", nullable=False, index=True)  # queued | running | succeeded | failed
     progress: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     reservation_id: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    external_task_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True, index=True)
+    byok_channel_id: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
     payment_source: Mapped[str] = mapped_column(String(32), default="platform_credits", nullable=False)
     mock: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     output_json: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)

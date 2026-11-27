@@ -1,8 +1,8 @@
 """FastMCP servers for Canvasphere & Pecan Studio dual entrypoints.
 
-1. `mcp` (`canvasphere`)       -> mounted at `/mcp` (legacy compatibility + stdio)
-2. `mcp_canvas` (`pecan-canvas`) -> mounted at `/mcp/canvas/` (direct canvas operations)
-3. `mcp_pecan` (`pecan-studio`)  -> mounted at `/mcp/pecan/`  (delegate to Pecan orchestrator)
+1. `mcp` (`canvasphere`)         -> mounted at `/mcp` (legacy compatibility + stdio)
+2. `mcp_canvas` (`pecan-canvas`) -> mounted at `/mcp/canvas/` (OAuth DCR + scope-enforced)
+3. `mcp_pecan` (`pecan-studio`)  -> mounted at `/mcp/pecan/`  (OAuth DCR + pecan:delegate enforced)
 """
 from __future__ import annotations
 
@@ -12,7 +12,27 @@ from fastmcp import FastMCP
 
 from app import agents, store
 from app.db import session_scope
-from app.models import Canvas, Project, TaskRun
+from app.mcp_auth_middleware import get_current_mcp_grant
+from app.models import Canvas, TaskRun
+
+
+def _enforce_mcp_grant(project_id: Optional[str], required_scope: str) -> Optional[dict[str, Any]]:
+    """Enforce active OAuth grant's project_id and scope inside MCP tool handlers."""
+    grant = get_current_mcp_grant()
+    if grant is None:
+        return None
+    if project_id is not None and grant.project_id != project_id:
+        return {
+            "error": f"MCP grant is restricted to project {grant.project_id}, cannot access {project_id}",
+            "code": "MCP_PROJECT_DENIED",
+        }
+    if required_scope not in grant.scopes:
+        return {
+            "error": f"MCP grant missing required scope: {required_scope}",
+            "code": "MCP_SCOPE_DENIED",
+        }
+    return None
+
 
 # --- Legacy combined MCP server (/mcp & stdio) ----------------------------
 mcp = FastMCP("canvasphere")
@@ -89,13 +109,23 @@ mcp_canvas = FastMCP("pecan-canvas")
 
 @mcp_canvas.tool
 def pecan_list_projects() -> dict[str, Any]:
-    """List active projects accessible on this Canvasphere instance."""
-    return {"projects": store.list_projects()}
+    """List projects accessible to the active MCP grant."""
+    denied = _enforce_mcp_grant(None, "canvas:read")
+    if denied:
+        return denied
+    grant = get_current_mcp_grant()
+    all_projs = store.list_projects()
+    if grant is not None:
+        all_projs = [p for p in all_projs if p["id"] == grant.project_id]
+    return {"projects": all_projs}
 
 
 @mcp_canvas.tool
 def pecan_canvas_read(project_id: str, canvas_id: Optional[str] = None) -> dict[str, Any]:
-    """Read objects on a project's canvas."""
+    """Read objects on a project's canvas (requires canvas:read)."""
+    denied = _enforce_mcp_grant(project_id, "canvas:read")
+    if denied:
+        return denied
     try:
         return {"project_id": project_id, "canvas_id": canvas_id, "objects": store.list_elements(project_id, canvas_id=canvas_id)}
     except KeyError as exc:
@@ -104,7 +134,10 @@ def pecan_canvas_read(project_id: str, canvas_id: Optional[str] = None) -> dict[
 
 @mcp_canvas.tool
 def directory_list(project_id: str) -> dict[str, Any]:
-    """List canvases and artefacts in a project directory."""
+    """List canvases and artefacts in a project directory (requires canvas:read)."""
+    denied = _enforce_mcp_grant(project_id, "canvas:read")
+    if denied:
+        return denied
     proj = store.get_project(project_id)
     if proj is None:
         return {"error": f"project not found: {project_id}"}
@@ -120,7 +153,10 @@ def directory_list(project_id: str) -> dict[str, Any]:
 
 @mcp_canvas.tool
 def pecan_canvas_add_node(project_id: str, type: str, x: float, y: float, text: str = "", canvas_id: Optional[str] = None) -> dict[str, Any]:
-    """Create a node directly on a project's canvas."""
+    """Create a node directly on a project's canvas (requires canvas:write)."""
+    denied = _enforce_mcp_grant(project_id, "canvas:write")
+    if denied:
+        return denied
     try:
         return store.add_element(project_id, type, x, y, 320, 180, text, canvas_id=canvas_id)
     except (KeyError, ValueError) as exc:
@@ -133,13 +169,19 @@ mcp_pecan = FastMCP("pecan-orchestrator")
 
 @mcp_pecan.tool
 def pecan_delegate_task(project_id: str, prompt: str, agent: Optional[str] = None) -> dict[str, Any]:
-    """Delegate a multi-agent creative task to Pecan Studio orchestrator."""
+    """Delegate a multi-agent creative task to Pecan Studio orchestrator (requires pecan:delegate)."""
+    denied = _enforce_mcp_grant(project_id, "pecan:delegate")
+    if denied:
+        return denied
     return delegate_task(project_id, prompt, agent)
 
 
 @mcp_pecan.tool
 def pecan_get_run_status(project_id: str, run_id: str) -> dict[str, Any]:
-    """Inspect a TaskRun's status, fence, and result."""
+    """Inspect a TaskRun's status, fence, and result (requires pecan:delegate)."""
+    denied = _enforce_mcp_grant(project_id, "pecan:delegate")
+    if denied:
+        return denied
     with session_scope() as db:
         r = db.get(TaskRun, run_id)
         if r is None or r.project_id != project_id:
