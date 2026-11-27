@@ -51,7 +51,7 @@ def test_react_tool_loop_midloop_approval_and_resume(strict_client, monkeypatch)
             tool_calls=[{
                 "id": "tc-2",
                 "name": "generate_image",
-                "args": {"prompt": "Cyberpunk rainy Tokyo street", "model_key": "gpt-image-2.6-flare-ox"},
+                "args": {"prompt": "Cyberpunk rainy Tokyo street", "model_key": "gpt-image-2.6-flare"},
             }],
             mock=False,
         ),
