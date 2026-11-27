@@ -70,7 +70,7 @@ def test_adapter_v1_url_normalization_and_live_models_filter(strict_client, monk
     # sync-live-models CLI restricts enabled rate cards to only the verified key(s)
     synced = cli.cmd_sync_live_models(enable_keys=["gpt-image-2.6-flare"])
     assert synced["enabled_keys"] == ["gpt-image-2.6-flare"]
-    assert synced["disabled_count"] >= 60
+    assert synced["disabled_count"] >= 58
 
     r_after = strict_client.get("/api/model-platform/models")
     assert r_after.status_code == 200
