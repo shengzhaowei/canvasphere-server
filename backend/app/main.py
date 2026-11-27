@@ -409,8 +409,8 @@ def create_approval_grant(
             "require_approval": require_approval(body.tool, project_id)}
 
 
-# --- tasks ----------------------------------------------------------------
-@app.post("/api/projects/{project_id}/tasks", status_code=201)
+# --- legacy tasks (deprecated: use /api/projects/{project_id}/canvases/{canvas_id}/studio/chat*)
+@app.post("/api/projects/{project_id}/tasks", status_code=201, deprecated=True)
 def create_task(
     project_id: str,
     body: TaskCreate,
@@ -438,7 +438,7 @@ def create_task(
     return out
 
 
-@app.get("/api/projects/{project_id}/tasks")
+@app.get("/api/projects/{project_id}/tasks", deprecated=True)
 def list_tasks(
     project_id: str,
     request: Request,
@@ -454,7 +454,7 @@ def list_tasks(
     return [_public_task(t, host) for t in tasks]
 
 
-@app.post("/api/projects/{project_id}/tasks/{task_id}/retry")
+@app.post("/api/projects/{project_id}/tasks/{task_id}/retry", deprecated=True)
 def retry_task(
     project_id: str,
     task_id: str,
@@ -490,7 +490,7 @@ def retry_task(
     return out
 
 
-@app.post("/api/projects/{project_id}/tasks/{task_id}/approve")
+@app.post("/api/projects/{project_id}/tasks/{task_id}/approve", deprecated=True)
 def approve_task(
     project_id: str,
     task_id: str,
@@ -528,7 +528,7 @@ def approve_task(
     return {"task_id": task_id, "status": updated["status"], "approved": True}
 
 
-@app.post("/api/projects/{project_id}/tasks/{task_id}/reject")
+@app.post("/api/projects/{project_id}/tasks/{task_id}/reject", deprecated=True)
 def reject_task(
     project_id: str,
     task_id: str,
@@ -555,8 +555,8 @@ def reject_task(
     return {"task_id": task_id, "status": updated["status"], "approved": False}
 
 
-# --- legacy default-canvas routes -----------------------------------------
-@app.get("/api/projects/{project_id}/canvas")
+# --- legacy default-canvas routes (deprecated: use /canvases/{canvas_id}/objects*)
+@app.get("/api/projects/{project_id}/canvas", deprecated=True)
 def get_canvas(
     project_id: str,
     request: Request,
@@ -571,7 +571,7 @@ def get_canvas(
         raise HTTPException(status_code=404, detail=str(exc))
 
 
-@app.post("/api/projects/{project_id}/canvas/elements", status_code=201)
+@app.post("/api/projects/{project_id}/canvas/elements", status_code=201, deprecated=True)
 def add_canvas_element(
     project_id: str,
     body: ElementCreate,
@@ -590,8 +590,8 @@ def add_canvas_element(
         raise HTTPException(status_code=400, detail=str(exc))
 
 
-# --- skills ---------------------------------------------------------------
-@app.get("/api/skills")
+# --- legacy file skills (deprecated: use /api/user/skills & /api/projects/{project_id}/skills/installed)
+@app.get("/api/skills", deprecated=True)
 def get_skills(project_id: Optional[str] = None) -> list[dict[str, Any]]:
     out = []
     for s in list_skills():
@@ -603,7 +603,7 @@ def get_skills(project_id: Optional[str] = None) -> list[dict[str, Any]]:
     return out
 
 
-@app.post("/api/skills/{name}/toggle")
+@app.post("/api/skills/{name}/toggle", deprecated=True)
 def toggle_skill(
     name: str,
     body: SkillToggle,

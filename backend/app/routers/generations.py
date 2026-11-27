@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import auth, billing, model_platform
+from app import auth, billing, model_platform, providers
 from app.db import get_db
 from app.models import Canvas, GenerationJob, Project, RateCard
 from app.permissions import can_write
@@ -130,6 +130,7 @@ def list_platform_models(
     modality: Optional[str] = Query(default=None),
     billing_mode: Optional[str] = Query(default=None),
     keyword: Optional[str] = Query(default=None),
+    live_only: bool = Query(default=False),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     ensure_rate_cards_seeded(db)
@@ -147,21 +148,30 @@ def list_platform_models(
         stmt = stmt.where(RateCard.display_name.ilike(kw) | RateCard.model_key.ilike(kw))
 
     cards = db.scalars(stmt).all()
-    items = [
-        {
-            "model_key": c.model_key,
-            "display_name": c.display_name,
-            "modality": c.modality,
-            "provider_family": c.provider_family,
-            "protocol_profile": c.protocol_profile,
-            "billing_mode": c.billing_mode,
-            "unit_price_credits": float(c.unit_price_credits),
-            "output_price_credits": float(c.output_price_credits) if c.output_price_credits is not None else None,
-            "pricing_meta": c.pricing_meta_json,
-            "capabilities": c.capabilities_json,
-        }
-        for c in cards
-    ]
+    items = []
+    for c in cards:
+        if c.modality == "text":
+            import os
+            live_cfg = bool(os.environ.get("LLM_API_KEY", "").strip())
+        else:
+            live_cfg = providers.resolve_env_credentials(c.protocol_profile) is not None
+        if live_only and not live_cfg:
+            continue
+        items.append(
+            {
+                "model_key": c.model_key,
+                "display_name": c.display_name,
+                "modality": c.modality,
+                "provider_family": c.provider_family,
+                "protocol_profile": c.protocol_profile,
+                "billing_mode": c.billing_mode,
+                "unit_price_credits": float(c.unit_price_credits),
+                "output_price_credits": float(c.output_price_credits) if c.output_price_credits is not None else None,
+                "pricing_meta": c.pricing_meta_json,
+                "capabilities": c.capabilities_json,
+                "live_configured": live_cfg,
+            }
+        )
     return {"models": items, "total": len(items)}
 
 

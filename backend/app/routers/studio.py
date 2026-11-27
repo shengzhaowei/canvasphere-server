@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -205,6 +205,30 @@ def studio_chat_stream(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.get("/api/projects/{project_id}/studio/runs")
+def list_studio_runs(
+    project_id: str,
+    request: Request,
+    session_id: Optional[str] = Query(default=None),
+    canvas_id: Optional[str] = Query(default=None),
+    status: Optional[str] = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=100),
+    x_role: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    auth.resolve_project_actor(project_id, request, db, x_role)
+    stmt = select(TaskRun).where(TaskRun.project_id == project_id)
+    if session_id:
+        stmt = stmt.where(TaskRun.session_id == session_id)
+    if canvas_id:
+        stmt = stmt.where(TaskRun.canvas_id == canvas_id)
+    if status:
+        stmt = stmt.where(TaskRun.status == status.strip().lower())
+    rows = db.scalars(stmt.order_by(TaskRun.created_at.desc()).limit(limit)).all()
+    items = [studio_agents.serialize_run(r) for r in rows]
+    return {"items": items, "total": len(items)}
 
 
 @router.get("/api/projects/{project_id}/studio/runs/{run_id}")

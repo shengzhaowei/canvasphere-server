@@ -27,6 +27,15 @@ class AdapterCallResult:
     pending_external_task_id: Optional[str] = None
 
 
+def _join_v1_path(base_url: str, subpath: str) -> str:
+    """Join an OpenAI/vendor /v1-prefixed subpath without duplicating /v1."""
+    base = base_url.rstrip("/")
+    clean = "/" + subpath.lstrip("/")
+    if base.endswith("/v1") and clean.startswith("/v1/"):
+        return base + clean[3:]
+    return base + clean
+
+
 def _decode_b64_or_fetch(item: dict[str, Any], default_mime: str, default_name: str) -> dict[str, Any]:
     if item.get("b64_json") or item.get("b64_data"):
         raw = base64.b64decode(item.get("b64_json") or item.get("b64_data"))
@@ -120,7 +129,7 @@ class OpenAIImageAdapter(BaseProviderAdapter):
             payload["background"] = params["background"]
         if params.get("output_format"):
             payload["output_format"] = params["output_format"]
-        return f"{base_url}/v1/images/generations", payload
+        return _join_v1_path(base_url, "/v1/images/generations"), payload
 
     def parse_response(self, data, *, mode, params):
         fmt = str(params.get("output_format") or "png").lower()
@@ -223,7 +232,7 @@ class VideoAsyncAdapter(BaseProviderAdapter):
                 payload[key] = params[key]
         if callback_url:
             payload["callback_url"] = callback_url
-        return f"{base_url}/v1/video/generations", payload
+        return _join_v1_path(base_url, "/v1/video/generations"), payload
 
     def parse_response(self, data, *, mode, params):
         if data.get("b64_data") or data.get("video_url"):
@@ -254,7 +263,7 @@ class MiniMaxMediaAdapter(BaseProviderAdapter):
                 "source_audio_object_id": params.get("source_audio_object_id"),
                 "language": params.get("language_boost", "auto"),
             }
-            return f"{base_url}/v1/audio/transcriptions", payload
+            return _join_v1_path(base_url, "/v1/audio/transcriptions"), payload
 
         if mode in ("tts", "voice_clone", "voice_design"):
             payload = {
@@ -282,7 +291,7 @@ class MiniMaxMediaAdapter(BaseProviderAdapter):
                 payload["pronunciation_dict"] = params["pronunciation_dict"]
             if params.get("voice_effect"):
                 payload["voice_modify"] = {"sound_effects": params["voice_effect"]}
-            return f"{base_url}/v1/t2a_v2", payload
+            return _join_v1_path(base_url, "/v1/t2a_v2"), payload
 
         # MiniMax H3 video
         payload = {
@@ -294,7 +303,7 @@ class MiniMaxMediaAdapter(BaseProviderAdapter):
         }
         if callback_url:
             payload["callback_url"] = callback_url
-        return f"{base_url}/v1/video_generation", payload
+        return _join_v1_path(base_url, "/v1/video_generation"), payload
 
     def parse_response(self, data, *, mode, params):
         if mode == "asr":
@@ -354,7 +363,7 @@ class SunoMusicAdapter(BaseProviderAdapter):
             payload["title"] = params["title"]
         if callback_url:
             payload["callback_url"] = callback_url
-        return f"{base_url}/v1/suno/generate", payload
+        return _join_v1_path(base_url, "/v1/suno/generate"), payload
 
     def parse_response(self, data, *, mode, params):
         if data.get("b64_data") or data.get("audio_url"):

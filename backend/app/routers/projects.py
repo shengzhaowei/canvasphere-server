@@ -182,6 +182,7 @@ def list_projects(
     order_by: str = Query(default="recent"),
     page: Optional[int] = Query(default=None, ge=1),
     size: Optional[int] = Query(default=None, ge=1, le=100),
+    ensure_default: bool = Query(default=False),
     actor: tuple[Optional[User], bool] = Depends(auth.get_optional_actor_or_legacy),
     db: Session = Depends(get_db),
 ) -> Any:
@@ -203,6 +204,27 @@ def list_projects(
             select(ProjectMember).where(ProjectMember.user_id == user.id)
         ).all()
         role_by_project = {m.project_id: normalize_role(m.role) for m in memberships}
+        # First-login starter project provisioning when explicitly requested
+        if (
+            ensure_default
+            and not keyword
+            and status in ("active", "all")
+            and scope in ("all", "owned")
+        ):
+            active_count = 0
+            if role_by_project:
+                active_count = int(
+                    db.scalar(
+                        select(func.count(Project.id)).where(
+                            Project.id.in_(list(role_by_project.keys())),
+                            Project.status == "active",
+                        )
+                    )
+                    or 0
+                )
+            if active_count == 0:
+                created = store.create_project("我的第一个项目", owner_id=user.id)
+                role_by_project[created["id"]] = "owner"
         if not role_by_project:
             return {"items": [], "total": 0, "page": page or 1, "size": size or 20}
         stmt = select(Project).where(Project.id.in_(list(role_by_project.keys())))

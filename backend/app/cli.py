@@ -16,9 +16,10 @@ from typing import Any, Optional
 
 from sqlalchemy import select, text
 
-from app import auth, billing, byok, db
+from app import auth, billing, byok, db, providers
 from app.config import get_settings, validate_production_readiness
-from app.models import RedeemCode, User, new_prefixed_id, utcnow
+from app.models import RateCard, RedeemCode, User, new_prefixed_id, utcnow
+from app.rate_cards_seed import ensure_rate_cards_seeded
 from app.redis_client import redis_status
 
 
@@ -155,6 +156,44 @@ def cmd_grant_byok(
         }
 
 
+def cmd_sync_live_models(
+    *,
+    enable_keys: Optional[list[str]] = None,
+    disable_unconfigured: bool = False,
+) -> dict[str, Any]:
+    """Enable only verified/configured models and disable all others to prevent mock billing."""
+    import os
+    db.init_db()
+    with db.session_scope() as session:
+        ensure_rate_cards_seeded(session)
+        cards = session.scalars(select(RateCard).order_by(RateCard.sort_order.asc())).all()
+        allow_set = {k.strip() for k in (enable_keys or []) if k.strip()}
+        enabled_list: list[str] = []
+        disabled_list: list[str] = []
+        for card in cards:
+            if allow_set:
+                should_enable = card.model_key in allow_set
+            elif disable_unconfigured:
+                if card.modality == "text":
+                    should_enable = bool(os.environ.get("LLM_API_KEY", "").strip())
+                else:
+                    should_enable = providers.resolve_env_credentials(card.protocol_profile) is not None
+            else:
+                should_enable = bool(card.enabled)
+            card.enabled = should_enable
+            session.add(card)
+            if should_enable:
+                enabled_list.append(card.model_key)
+            else:
+                disabled_list.append(card.model_key)
+        session.commit()
+        return {
+            "enabled_count": len(enabled_list),
+            "disabled_count": len(disabled_list),
+            "enabled_keys": enabled_list,
+        }
+
+
 def cmd_check_env() -> dict[str, Any]:
     """Inspect runtime configuration, DB connectivity, and Redis status."""
     settings = get_settings()
@@ -206,6 +245,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_chk = sub.add_parser("check-env", help="Validate production readiness and dependencies")
     p_chk.add_argument("--strict", action="store_true", help="Exit 1 if any readiness issue is found")
 
+    p_sync = sub.add_parser("sync-live-models", help="Toggle rate cards to match verified live upstream channels")
+    p_sync.add_argument("--enable-keys", default="", help="Comma-separated model_keys to keep enabled (disables all others)")
+    p_sync.add_argument("--disable-unconfigured", action="store_true", help="Disable every model without live env credentials")
+
     args = parser.parse_args(argv)
     if args.command == "bootstrap-admin":
         res = cmd_bootstrap_admin(email=args.email, password=args.password, display_name=args.display_name)
@@ -213,6 +256,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         res = cmd_create_redeem_code(code=args.code, credits=args.credits, max_uses=args.max_uses, credit_pool=args.pool)
     elif args.command == "grant-byok":
         res = cmd_grant_byok(email=args.email, max_channels=args.max_channels, enabled=not args.disable)
+    elif args.command == "sync-live-models":
+        keys = [k.strip() for k in args.enable_keys.split(",") if k.strip()] if args.enable_keys else None
+        res = cmd_sync_live_models(enable_keys=keys, disable_unconfigured=args.disable_unconfigured)
     else:
         res = cmd_check_env()
         print(json.dumps(res, ensure_ascii=False, indent=2))

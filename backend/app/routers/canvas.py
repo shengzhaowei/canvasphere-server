@@ -325,6 +325,7 @@ def update_canvas_object(
     lease_manager.check_writable(project_id, canvas_id, object_id, actor_id)
 
     if body.expected_version is not None and int(body.expected_version) != int(obj.version):
+        cur_lease = lease_manager.get_active_lease(project_id, canvas_id, object_id)
         raise HTTPException(
             status_code=409,
             detail={
@@ -332,6 +333,7 @@ def update_canvas_object(
                 "message": f"object {object_id} version mismatch",
                 "expected_version": body.expected_version,
                 "current_version": int(obj.version),
+                "current_object": serialize_canvas_object(obj, lease=cur_lease.to_dict() if cur_lease else None),
             },
         )
 
@@ -474,6 +476,7 @@ def delete_canvas_objects(
             raise HTTPException(status_code=404, detail=f"object not found: {oid}")
         lease_manager.check_writable(project_id, canvas_id, oid, actor_id)
         if oid in expected_versions and int(expected_versions[oid]) != int(obj.version):
+            cur_lease = lease_manager.get_active_lease(project_id, canvas_id, oid)
             raise HTTPException(
                 status_code=409,
                 detail={
@@ -481,6 +484,7 @@ def delete_canvas_objects(
                     "message": f"object {oid} version mismatch on delete",
                     "expected_version": expected_versions[oid],
                     "current_version": int(obj.version),
+                    "current_object": serialize_canvas_object(obj, lease=cur_lease.to_dict() if cur_lease else None),
                 },
             )
         targets.append(obj)
