@@ -155,7 +155,7 @@ class Settings:
 def get_settings() -> Settings:
     raw_cors = os.environ.get(
         "CORS_ORIGINS",
-        "http://localhost:5173,http://127.0.0.1:5173,http://8.220.194.80:5173",
+        "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5175,http://127.0.0.1:5175,http://localhost:4175,http://8.220.194.80:5173,http://8.220.194.80:5175",
     )
     cors_origins = tuple(o.strip() for o in raw_cors.split(",") if o.strip())
     jwt_secret = os.environ.get("JWT_SECRET", "dev-insecure-canvasphere-jwt-secret-change-me")

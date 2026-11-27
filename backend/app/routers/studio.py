@@ -26,6 +26,7 @@ class StudioChatRequest(BaseModel):
     prompt: str
     session_id: Optional[str] = None
     agent: Optional[str] = None
+    agent_hint: Optional[str] = None
     skills: list[str] = Field(default_factory=list)
     context_object_ids: list[str] = Field(default_factory=list)
     request_id: Optional[str] = None
@@ -117,6 +118,7 @@ def list_session_messages(
         "messages": [
             {
                 "id": m.id,
+                "session_id": m.session_id,
                 "role": m.role,
                 "agent_name": m.agent_name,
                 "content": m.content,
@@ -157,7 +159,7 @@ def studio_chat(
         user_id=user.id if user else None,
         prompt=body.prompt,
         session_id=body.session_id,
-        agent_hint=body.agent,
+        agent_hint=body.agent or body.agent_hint,
         explicit_skills=body.skills,
         context_object_ids=body.context_object_ids,
         request_id=body.request_id,
@@ -190,7 +192,7 @@ def studio_chat_stream(
         user_id=user.id if user else None,
         prompt=body.prompt,
         session_id=body.session_id,
-        agent_hint=body.agent,
+        agent_hint=body.agent or body.agent_hint,
         explicit_skills=body.skills,
         context_object_ids=body.context_object_ids,
         request_id=body.request_id,
@@ -228,7 +230,7 @@ def list_studio_runs(
         stmt = stmt.where(TaskRun.status == status.strip().lower())
     rows = db.scalars(stmt.order_by(TaskRun.created_at.desc()).limit(limit)).all()
     items = [studio_agents.serialize_run(r) for r in rows]
-    return {"items": items, "total": len(items)}
+    return {"items": items, "runs": items, "total": len(items)}
 
 
 @router.get("/api/projects/{project_id}/studio/runs/{run_id}")

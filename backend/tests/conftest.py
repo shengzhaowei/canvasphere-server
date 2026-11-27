@@ -36,6 +36,7 @@ _P0_STRICT_MODULES = {
     "test_p7_ops_readiness_and_cli.py",
     "test_p8_frontend_p0_alignment.py",
     "test_p9_snapshots_comments_shares_skills.py",
+    "test_frontend_wire_contract.py",
 }
 
 

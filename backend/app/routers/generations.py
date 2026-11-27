@@ -25,6 +25,8 @@ class EstimateRequest(BaseModel):
 class ImageGenerationRequest(BaseModel):
     model_key: str
     prompt: str
+    mode: str = "imagine"
+    params: Optional[dict[str, Any]] = None
     target_object_id: Optional[str] = None
     input_object_ids: list[str] = Field(default_factory=list)
     count: int = 1
@@ -199,7 +201,9 @@ def generate_image(
     if not can_write(role):
         raise HTTPException(status_code=403, detail="viewer cannot trigger image generation")
     proj, canvas = _ensure_project_and_canvas(db, project_id, canvas_id)
-    params = body.model_dump(exclude={"model_key", "prompt", "target_object_id", "input_object_ids", "payment_source"})
+    params = body.model_dump(exclude={"model_key", "prompt", "mode", "params", "target_object_id", "input_object_ids", "payment_source"})
+    if isinstance(body.params, dict):
+        params.update({k: v for k, v in body.params.items() if v is not None})
     return model_platform.run_generation_pipeline(
         db,
         project=proj,
@@ -207,7 +211,7 @@ def generate_image(
         user_id=user.id if user else None,
         modality="image",
         model_key=body.model_key,
-        mode="imagine",
+        mode=body.mode or "imagine",
         prompt=body.prompt,
         params=params,
         target_object_id=body.target_object_id,

@@ -432,14 +432,18 @@ async def exchange_oauth_code(provider: str, code: str) -> OAuthProfile:
 # --- User serialization & FastAPI dependencies ---------------------------
 def serialize_user_profile(user: User) -> dict[str, Any]:
     return {
+        "id": user.id,
         "user_id": user.id,
         "display_name": user.display_name,
         "avatar_url": user.avatar_url,
         "email": user.email,
         "email_verified": bool(user.email_verified),
+        "has_password": bool(user.password_hash),
         "has_local_credential": bool(user.password_hash),
         "roles": list(user.roles or ["user"]),
         "is_active": bool(user.is_active),
+        "created_at": user.created_at.isoformat() if user.created_at else None,
+        "updated_at": user.updated_at.isoformat() if user.updated_at else None,
     }
 
 

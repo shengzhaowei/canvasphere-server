@@ -118,6 +118,10 @@ def _project_detail(
         .order_by(Canvas.is_default.desc(), Canvas.sort_order.asc(), Canvas.created_at.asc())
     ).all()
     default_cid = canvases[0].id if canvases else None
+    member_count = int(
+        db.scalar(select(func.count(ProjectMember.id)).where(ProjectMember.project_id == proj.id)) or 0
+    )
+    norm_role = normalize_role(role)
     flags = project_permission_flags(role)
     return {
         "id": proj.id,
@@ -130,8 +134,10 @@ def _project_detail(
         "cover_type": proj.cover_type,
         "owner_id": proj.owner_id,
         "canvas_count": len(canvases),
+        "member_count": max(1, member_count),
         "default_canvas_id": default_cid,
-        "my_role": normalize_role(role),
+        "role": norm_role,
+        "my_role": norm_role,
         **flags,
         "permissions": flags,
         "last_activity_at": _iso(proj.last_activity_at),
@@ -186,7 +192,9 @@ def list_projects(
     status: str = Query(default="active"),
     scope: str = Query(default="all"),
     keyword: Optional[str] = Query(default=None),
+    search: Optional[str] = Query(default=None),
     order_by: str = Query(default="recent"),
+    sort: Optional[str] = Query(default=None),
     page: Optional[int] = Query(default=None, ge=1),
     size: Optional[int] = Query(default=None, ge=1, le=100),
     ensure_default: bool = Query(default=False),
@@ -194,15 +202,18 @@ def list_projects(
     db: Session = Depends(get_db),
 ) -> Any:
     user, is_legacy = actor
+    effective_kw = keyword if keyword is not None else search
+    sort_alias_map = {"activity": "recent", "created": "created_at", "role": "role", "recent": "recent", "created_at": "created_at"}
+    effective_order = sort_alias_map.get((sort or order_by).strip().lower(), order_by)
     if status not in ("active", "deleting", "all"):
         raise HTTPException(status_code=400, detail="status must be active, deleting, or all")
     if scope not in ("all", "owned", "joined"):
         raise HTTPException(status_code=400, detail="scope must be all, owned, or joined")
-    if order_by not in ("recent", "created_at", "role"):
+    if effective_order not in ("recent", "created_at", "role"):
         raise HTTPException(status_code=400, detail="order_by must be recent, created_at, or role")
 
     # Legacy unauthenticated tests expect a plain list when no pagination params are passed
-    if is_legacy and page is None and size is None and not keyword and status == "active" and scope == "all":
+    if is_legacy and page is None and size is None and not effective_kw and status == "active" and scope == "all":
         return store.list_projects()
 
     role_by_project: dict[str, str] = {}
@@ -214,7 +225,7 @@ def list_projects(
         # First-login starter project provisioning when explicitly requested
         if (
             ensure_default
-            and not keyword
+            and not effective_kw
             and status in ("active", "all")
             and scope in ("all", "owned")
         ):
@@ -233,17 +244,17 @@ def list_projects(
                 created = store.create_project("我的第一个项目", owner_id=user.id)
                 role_by_project[created["id"]] = "owner"
         if not role_by_project:
-            return {"items": [], "total": 0, "page": page or 1, "size": size or 20}
+            return {"items": [], "projects": [], "total": 0, "page": page or 1, "size": size or 20}
         stmt = select(Project).where(Project.id.in_(list(role_by_project.keys())))
         if scope == "owned":
             owned_ids = [pid for pid, r in role_by_project.items() if r == "owner"]
             if not owned_ids:
-                return {"items": [], "total": 0, "page": page or 1, "size": size or 20}
+                return {"items": [], "projects": [], "total": 0, "page": page or 1, "size": size or 20}
             stmt = stmt.where(Project.id.in_(owned_ids))
         elif scope == "joined":
             joined_ids = [pid for pid, r in role_by_project.items() if r != "owner"]
             if not joined_ids:
-                return {"items": [], "total": 0, "page": page or 1, "size": size or 20}
+                return {"items": [], "projects": [], "total": 0, "page": page or 1, "size": size or 20}
             stmt = stmt.where(Project.id.in_(joined_ids))
     else:
         stmt = select(Project)
@@ -253,18 +264,18 @@ def list_projects(
     else:
         stmt = stmt.where(Project.status == status)
 
-    if keyword and keyword.strip():
-        kw = f"%{keyword.strip()}%"
+    if effective_kw and effective_kw.strip():
+        kw = f"%{effective_kw.strip()}%"
         stmt = stmt.where(Project.name.ilike(kw))
 
     rows = db.scalars(stmt).all()
 
     role_rank = {"owner": 0, "editor": 1, "viewer": 2}
-    if order_by == "recent":
+    if effective_order == "recent":
         rows.sort(key=lambda p: p.last_activity_at, reverse=True)
-    elif order_by == "created_at":
+    elif effective_order == "created_at":
         rows.sort(key=lambda p: p.created_at, reverse=True)
-    elif order_by == "role":
+    elif effective_order == "role":
         rows.sort(key=lambda p: (role_rank.get(role_by_project.get(p.id, "owner"), 9), -p.last_activity_at.timestamp()))
 
     total = len(rows)
@@ -273,7 +284,7 @@ def list_projects(
     start = (cur_page - 1) * cur_size
     sliced = rows[start: start + cur_size]
     items = [_project_detail(db, p, role=role_by_project.get(p.id, "owner")) for p in sliced]
-    return {"items": items, "total": total, "page": cur_page, "size": cur_size}
+    return {"items": items, "projects": items, "total": total, "page": cur_page, "size": cur_size}
 
 
 @router.get("/api/projects/{project_id}")

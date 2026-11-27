@@ -162,12 +162,16 @@ def list_sandbox_records(
 @router.get("/api/user/billing/price-explanation")
 def get_price_explanation(
     modality: Optional[str] = Query(default=None),
+    search: Optional[str] = Query(default=None),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     ensure_rate_cards_seeded(db)
     stmt = select(RateCard).where(RateCard.enabled.is_(True)).order_by(RateCard.sort_order.asc())
     if modality:
         stmt = stmt.where(RateCard.modality == modality.strip().lower())
+    if search and search.strip():
+        kw = f"%{search.strip()}%"
+        stmt = stmt.where(RateCard.display_name.ilike(kw) | RateCard.model_key.ilike(kw))
     cards = db.scalars(stmt).all()
     items = [
         {
@@ -191,8 +195,10 @@ def get_price_explanation(
     return {
         "exchange_rate": "100 credits = 1 CNY",
         "total_enabled_rate_cards": len(items),
+        "total": len(items),
         "counts_by_modality": by_modality,
         "rate_cards": items,
+        "models": items,
     }
 
 
