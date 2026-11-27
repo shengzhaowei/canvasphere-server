@@ -145,14 +145,14 @@ def test_admin_users_rate_cards_and_billing_overview(strict_client):
     assert strict_client.get("/api/admin/rate-cards", headers=h_user).status_code == 403
     assert strict_client.get("/api/admin/billing/overview", headers=h_user).status_code == 403
 
-    # Admin updates gpt-image-2.6-flare-ox price -> estimate reflects new price immediately
+    # Admin updates gpt-image-2.6-flare price -> estimate reflects new price immediately
     r_patch = strict_client.patch(
-        "/api/admin/rate-cards/gpt-image-2.6-flare-ox",
+        "/api/admin/rate-cards/gpt-image-2.6-flare",
         json={"unit_price_credits": 50.0},
         headers=h_admin,
     )
     assert r_patch.status_code == 200 and r_patch.json()["unit_price_credits"] == 50.0
-    est = strict_client.post("/api/model-platform/estimate", json={"model_key": "gpt-image-2.6-flare-ox", "params": {"count": 2}}).json()
+    est = strict_client.post("/api/model-platform/estimate", json={"model_key": "gpt-image-2.6-flare", "params": {"count": 2}}).json()
     assert est["estimated_credits"] == 100.0
 
     # Admin disables normal user -> their active access token immediately returns 401
@@ -171,7 +171,7 @@ def test_byok_runtime_routing_rpm_limit_and_zero_platform_deduction(strict_clien
     proj = strict_client.post("/api/projects", json={"name": "BYOK Studio"}, headers=h).json()
     pid, cid = proj["id"], proj["default_canvas_id"]
 
-    # Enable BYOK, add Ark channel with rpm_limit=1 and offering for seedream-5.0-pro-ox
+    # Enable BYOK, add Ark channel with rpm_limit=1 and offering for doubao-seedream-5-0-260128
     strict_client.put(f"/api/admin/model-platform/byok-entitlement/{uid}", json={"enabled": True, "max_channels": 2, "max_offerings_per_channel": 5}, headers=h_admin)
     ch = strict_client.post(
         "/api/user/model-platform/channels",
@@ -180,7 +180,7 @@ def test_byok_runtime_routing_rpm_limit_and_zero_platform_deduction(strict_clien
     ).json()
     strict_client.post(
         "/api/user/model-platform/offerings",
-        json={"channel_id": ch["id"], "canonical_model_key": "seedream-5.0-pro-ox", "upstream_model_id": "ep-custom-seedream"},
+        json={"channel_id": ch["id"], "canonical_model_key": "doubao-seedream-5-0-260128", "upstream_model_id": "ep-custom-seedream"},
         headers=h,
     )
 
@@ -199,7 +199,7 @@ def test_byok_runtime_routing_rpm_limit_and_zero_platform_deduction(strict_clien
     # First BYOK generation routes to user's custom Ark channel, charges 0 platform credits
     r1 = strict_client.post(
         f"/api/projects/{pid}/canvases/{cid}/generations/image",
-        json={"model_key": "seedream-5.0-pro-ox", "prompt": "BYOK art", "payment_source": "byok"},
+        json={"model_key": "doubao-seedream-5-0-260128", "prompt": "BYOK art", "payment_source": "byok"},
         headers=h,
     )
     assert r1.status_code == 201, r1.text
@@ -212,7 +212,7 @@ def test_byok_runtime_routing_rpm_limit_and_zero_platform_deduction(strict_clien
     # Second immediate call exceeds channel rpm_limit=1 -> 429
     r2 = strict_client.post(
         f"/api/projects/{pid}/canvases/{cid}/generations/image",
-        json={"model_key": "seedream-5.0-pro-ox", "prompt": "Too fast", "payment_source": "byok"},
+        json={"model_key": "doubao-seedream-5-0-260128", "prompt": "Too fast", "payment_source": "byok"},
         headers=h,
     )
     assert r2.status_code == 429
