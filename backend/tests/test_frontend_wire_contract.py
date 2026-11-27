@@ -65,7 +65,7 @@ def test_frontend_api_ts_exact_wire_contract(strict_client, monkeypatch):
         f"/api/projects/{pid}/canvases/{cid}/generations/image",
         headers=headers,
         json={
-            "model_key": "gpt-image-2.6-flare-ox",
+            "model_key": "gpt-image-2.6-flare",
             "prompt": "neon cyberpunk street",
             "mode": "imagine",
             "params": {"count": 2, "output_format": "webp"},
@@ -82,7 +82,7 @@ def test_frontend_api_ts_exact_wire_contract(strict_client, monkeypatch):
     pe = strict_client.get("/api/user/billing/price-explanation?modality=image&search=flare", headers=headers)
     assert pe.status_code == 200, pe.text
     assert pe.json()["total"] >= 1
-    assert any(m["model_key"] == "gpt-image-2.6-flare-ox" for m in pe.json()["models"])
+    assert any(m["model_key"] == "gpt-image-2.6-flare" for m in pe.json()["models"])
 
     # 6. CORS preflight for Vite dev port 5175 succeeds
     cors = strict_client.options(
