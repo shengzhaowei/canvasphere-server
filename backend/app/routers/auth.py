@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 from typing import Any, Optional
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -208,7 +210,8 @@ async def oauth_callback(
     request: Request,
     response: Response,
     db: Session = Depends(get_db),
-) -> dict[str, Any]:
+) -> Response:
+    settings = get_settings()
     state_payload = auth.decode_oauth_state(state, expected_provider=provider)
     profile = await auth.exchange_oauth_code(provider, code)
     mode = state_payload.get("mode", "login")
@@ -247,7 +250,12 @@ async def oauth_callback(
                 created_at=utcnow(),
             ))
             db.commit()
-        return {"bound": True, "provider": provider, "user": auth.serialize_user_profile(user)}
+        # Bind 完成：302 回前端回调页（fragment 带绑定结果，不再返回 raw JSON）。
+        fragment = urlencode({"bound": "true", "provider": provider})
+        return RedirectResponse(
+            url=f"{settings.frontend_url}/auth/callback#{fragment}",
+            status_code=302,
+        )
 
     # Login mode
     if existing_binding is not None:
@@ -289,4 +297,19 @@ async def oauth_callback(
         db.flush()
 
     tokens = auth.issue_token_pair(db, user, request=request, response=response)
-    return {**tokens, "provider": provider, "user": auth.serialize_user_profile(user)}
+    # 登录成功：302 回前端回调页，token 放 URL fragment 里（不经过后端日志/查询串，
+    # 前端弹窗读取后存入 localStorage；注入的 response 上设置的 cookie 不随重定向携带，
+    # 跨站场景下本来也发不出去，故以 fragment 为准）。
+    fragment = urlencode(
+        {
+            "access_token": tokens["access_token"],
+            "refresh_token": tokens["refresh_token"],
+            "token_type": "Bearer",
+            "expires_in": tokens["expires_in"],
+            "provider": provider,
+        }
+    )
+    return RedirectResponse(
+        url=f"{settings.frontend_url}/auth/callback#{fragment}",
+        status_code=302,
+    )
