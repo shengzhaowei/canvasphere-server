@@ -111,8 +111,8 @@ def build_seed_rate_cards() -> list[dict[str, Any]]:
     cards: list[dict[str, Any]] = [
         # --- 4 Text LLMs ---
         {
-            "model_key": "gpt-6.1-sol",
-            "display_name": "GPT 6.1 Sol",
+            "model_key": "gpt-6-sol",
+            "display_name": "GPT 6 Sol",
             "modality": "text",
             "provider_family": "OpenAI",
             "protocol_profile": "openai_compatible_chat",
@@ -195,18 +195,18 @@ def build_seed_rate_cards() -> list[dict[str, Any]]:
                 ),
             }
             for key, name, fam, proto, price in [
-                ("gpt-image-2.6-flare-ox", "GPT Image 2.6 Flare (ox)", "OpenAI", "openlux_gpt_images", "18.0000"),
-                ("gpt-image-2.6-sunburst-ox", "GPT Image 2.6 Sunburst (ox)", "OpenAI", "openlux_gpt_images", "24.0000"),
-                ("gpt-image-2.5-sunburst-ox-1k", "GPT Image 2.5 Sunburst(ox-1k)", "OpenAI", "openlux_gpt_images", "16.0000"),
-                ("gpt-image-2.5-sunburst-ox-hd", "GPT Image 2.5 Sunburst(ox-hd·1K/2K/4K)", "OpenAI", "openlux_gpt_images", "28.0000"),
-                ("gpt-image-2.5-flare-ox-hd", "GPT Image 2.5 Flare(ox-hd·1K/2K/4K)", "OpenAI", "openlux_gpt_images", "22.0000"),
-                ("gpt-image-2-ox-hd", "GPT Image 2(ox-hd·1K/2K/4K)", "OpenAI", "openlux_gpt_images", "20.0000"),
+                ("gpt-image-2.6-flare", "GPT Image 2.6 Flare", "OpenAI", "openlux_gpt_images", "18.0000"),
+                ("gpt-image-2.6-sunburst", "GPT Image 2.6 Sunburst", "OpenAI", "openlux_gpt_images", "24.0000"),
+                ("gpt-image-2.5-sunburst", "GPT Image 2.5 Sunburst", "OpenAI", "openlux_gpt_images", "16.0000"),
+                
+                
+                
                 ("qwen-image-3.0", "qwen-image-3.0", "Qwen", "qwen_images", "12.0000"),
                 ("qwen-image-3.0-pro", "qwen-image-3.0-pro", "Qwen", "qwen_images", "18.0000"),
                 ("doubao-seedream-5-0-260128", "doubao-seedream-5-0-260128", "Volcengine", "ark_images", "15.0000"),
-                ("seedream-5.0-pro-ox", "Seedream 5.0 Pro(ox)", "Volcengine", "ark_images", "22.0000"),
-                ("gemini-nano-banana-2.1", "gemini-nano-banana-2.1", "Google", "gemini_images", "14.0000"),
-                ("banana2", "banana2", "Google", "gemini_images", "10.0000"),
+                
+                ("gemini-nano-banana-2.1", "Gemini Nano Banana 2.1", "Google", "gemini_images", "14.0000"),
+                
                 ("midjourney-v7", "Midjourney-V7", "Midjourney", "midjourney_proxy", "35.0000"),
                 ("midjourney-v8.2", "Midjourney-V8.2", "Midjourney", "midjourney_proxy", "42.0000"),
                 ("midjourney-niji", "Midjourney-Niji", "Midjourney", "midjourney_proxy", "35.0000"),
