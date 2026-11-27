@@ -1,1 +1,29 @@
-{"mcpServers":{"canvasphere-http":{"description":"HTTP 方式（Streamable HTTP，2026-11-25 已实现并实测）：先起后端 uvicorn app.main:app，再连。注意 URL 末尾斜杠不可少；客户端先 initialize（取响应头 mcp-session-id），再发 notifications/initialized，后续请求带 mcp-session-id 头。工具与 stdio 相同：read_canvas、add_node、update_node、list_project_files、delegate_task。","transport":"streamable-http","url":"http://localhost:8000/mcp/"},"canvasphere-stdio":{"args":["backend/app/mcp_server.py"],"command":"python","description":"stdio 方式：Claude Code / Codex 在本项目根目录直接启动 FastMCP server。cwd 须为项目根目录，backend/app/mcp_server.py 为相对路径。","env":{"LLM_API_KEY":"${LLM_API_KEY}","LLM_BASE_URL":"${LLM_BASE_URL}","LLM_MODEL":"${LLM_MODEL}"}}}}
+{
+  "mcpServers": {
+    "pecan-canvas": {
+      "description": "Pecan Canvas MCP（项目级细粒度画布读写，强制 OAuth 2.0 DCR / Bearer mcp_tok_... 鉴权；注意 URL 末尾斜杠不可少）",
+      "transport": "streamable-http",
+      "url": "http://localhost:8000/mcp/canvas/"
+    },
+    "pecan-orchestrator": {
+      "description": "Pecan Studio 编排 MCP（项目列表查询与多智能体任务委派，强制 OAuth 2.0 DCR / Bearer mcp_tok_... 鉴权）",
+      "transport": "streamable-http",
+      "url": "http://localhost:8000/mcp/pecan/"
+    },
+    "canvasphere-http-legacy": {
+      "description": "兼容旧版 Streamable-HTTP MCP 入口（用于本地调试与向后兼容）",
+      "transport": "streamable-http",
+      "url": "http://localhost:8000/mcp/"
+    },
+    "canvasphere-stdio": {
+      "args": ["backend/app/mcp_server.py"],
+      "command": "python",
+      "description": "stdio 方式：Claude Code / Codex 在本项目根目录直接启动 FastMCP server。",
+      "env": {
+        "LLM_API_KEY": "${LLM_API_KEY}",
+        "LLM_BASE_URL": "${LLM_BASE_URL}",
+        "LLM_MODEL": "${LLM_MODEL}"
+      }
+    }
+  }
+}

@@ -19,9 +19,10 @@ from typing import Any, Optional
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 load_dotenv()
@@ -30,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 from app import agents, auth, store  # noqa: E402
 from app.checkpoint import get_checkpointer  # noqa: E402
-from app.config import get_settings  # noqa: E402
+from app.config import get_settings, validate_production_readiness  # noqa: E402
 from app.db import db_kind, get_db, init_db, session_scope  # noqa: E402
 from app.observability import configure_logging, metrics_middleware, prometheus_response  # noqa: E402
 from app.permissions import (  # noqa: E402
@@ -261,6 +262,37 @@ def health() -> dict[str, Any]:
         "redis": redis_status(),
         "async_worker": settings.async_worker_enabled,
         "storage_backend": settings.effective_storage_backend,
+    }
+
+
+@app.get("/health/ready")
+def health_ready(response: Response, db: Session = Depends(get_db)) -> dict[str, Any]:
+    """Deep readiness probe checking DB connectivity, configured Redis, and config warnings."""
+    from app.redis_client import redis_status
+    settings = get_settings()
+    db_ok = True
+    db_error: Optional[str] = None
+    try:
+        db.execute(text("SELECT 1"))
+    except Exception as exc:  # noqa: BLE001
+        db_ok = False
+        db_error = str(exc)
+
+    r_status = redis_status()
+    redis_ok = True if not settings.redis_url else (r_status == "redis")
+    warnings = validate_production_readiness(settings)
+    ready = db_ok and redis_ok and (not settings.production_strict or len(warnings) == 0)
+    if not ready:
+        response.status_code = 503
+    return {
+        "status": "ready" if ready else "degraded",
+        "ready": ready,
+        "checks": {
+            "db": {"ok": db_ok, "kind": db_kind(), "error": db_error},
+            "redis": {"ok": redis_ok, "status": r_status, "configured": bool(settings.redis_url)},
+            "storage": {"backend": settings.effective_storage_backend},
+        },
+        "warnings": warnings,
     }
 
 
@@ -601,6 +633,13 @@ try:
 
     @asynccontextmanager
     async def _combined_mcp_lifespan(parent_app: FastAPI):
+        s = get_settings()
+        issues = validate_production_readiness(s)
+        if issues:
+            msg = "Production readiness warnings: " + "; ".join(issues)
+            if s.production_strict:
+                raise RuntimeError(msg)
+            logger.warning(msg)
         async with AsyncExitStack() as stack:
             await stack.enter_async_context(_mcp_canvas_app.lifespan(parent_app))
             await stack.enter_async_context(_mcp_pecan_app.lifespan(parent_app))

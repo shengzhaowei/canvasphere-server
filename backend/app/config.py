@@ -139,6 +139,9 @@ class Settings:
     suno_base_url: str
     suno_api_key: str
 
+    # P7: Production boot guardrails
+    production_strict: bool
+
     @property
     def effective_storage_backend(self) -> str:
         mode = self.storage_backend.strip().lower()
@@ -234,4 +237,30 @@ def get_settings() -> Settings:
         minimax_api_key=os.environ.get("MINIMAX_API_KEY", "").strip(),
         suno_base_url=os.environ.get("SUNO_BASE_URL", "").strip().rstrip("/"),
         suno_api_key=os.environ.get("SUNO_API_KEY", "").strip(),
+        production_strict=_bool_env("PRODUCTION_STRICT", False),
     )
+
+
+_INSECURE_SECRET_MARKERS = (
+    "dev-insecure-canvasphere-jwt-secret-change-me",
+    "replace-with-strong-random-secret",
+    "replace-with-webhook-secret",
+    "changeme",
+)
+
+
+def validate_production_readiness(settings: Settings | None = None) -> list[str]:
+    """Return a list of security/configuration issues for production deployment."""
+    s = settings or get_settings()
+    issues: list[str] = []
+    if not s.jwt_secret or len(s.jwt_secret) < 32 or s.jwt_secret in _INSECURE_SECRET_MARKERS:
+        issues.append("JWT_SECRET must be a non-default random string of at least 32 characters")
+    if s.auth_allow_legacy_role_header:
+        issues.append("AUTH_ALLOW_LEGACY_ROLE_HEADER must be false in production")
+    if s.provider_webhook_secret in _INSECURE_SECRET_MARKERS:
+        issues.append("PROVIDER_WEBHOOK_SECRET is still set to a placeholder value")
+    if not s.database_url:
+        issues.append("DATABASE_URL is not configured (falling back to in-memory SQLite)")
+    if s.effective_storage_backend == "local" and not str(s.local_storage_dir).strip():
+        issues.append("LOCAL_STORAGE_DIR is empty")
+    return issues

@@ -5,6 +5,7 @@
 services:
   nginx:
     image: nginx:1.27-alpine
+    restart: unless-stopped
     ports:
       - "80:80"
     volumes:
@@ -22,6 +23,7 @@ services:
 
   api:
     build: ./backend
+    restart: unless-stopped
     ports:
       - "8000:8000"
     env_file:
@@ -43,6 +45,7 @@ services:
       - FFMPEG_THREADS=${FFMPEG_THREADS:-2}
       - AUTH_ALLOW_LEGACY_ROLE_HEADER=${AUTH_ALLOW_LEGACY_ROLE_HEADER:-false}
       - LOCAL_STORAGE_DIR=${LOCAL_STORAGE_DIR:-/data/storage}
+      - LOG_FORMAT=${LOG_FORMAT:-json}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - storage_data:/data/storage
@@ -66,6 +69,7 @@ services:
 
   worker:
     build: ./backend
+    restart: unless-stopped
     command: ["arq", "app.worker.WorkerSettings"]
     env_file:
       - .env
@@ -81,11 +85,13 @@ services:
       - FFMPEG_THREADS=${FFMPEG_THREADS:-2}
       - FFMPEG_MAX_CONCURRENT=${FFMPEG_MAX_CONCURRENT:-1}
       - LOCAL_STORAGE_DIR=${LOCAL_STORAGE_DIR:-/data/storage}
+      - LOG_FORMAT=${LOG_FORMAT:-json}
     volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
       - storage_data:/data/storage
       - ./skills:/skills:ro
     depends_on:
-      db:
+      api:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -97,6 +103,7 @@ services:
 
   yjs:
     build: ./yjs
+    restart: unless-stopped
     env_file:
       - .env
     environment:
@@ -113,6 +120,7 @@ services:
 
   db:
     image: postgres:16-alpine
+    restart: unless-stopped
     ports:
       - "127.0.0.1:5432:5432"
     environment:
@@ -143,6 +151,7 @@ services:
 
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
     ports:
       - "127.0.0.1:6379:6379"
     command: ["redis-server", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction", "--appendonly", "yes"]
