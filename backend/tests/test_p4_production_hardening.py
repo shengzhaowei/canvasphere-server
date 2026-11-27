@@ -48,7 +48,7 @@ def test_async_worker_generation_dispatch_and_background_execution(strict_client
 
     r = strict_client.post(
         f"/api/projects/{pid}/canvases/{cid}/generations/image",
-        json={"model_key": "gpt-image-2.6-flare-ox", "prompt": "Async sunset"},
+        json={"model_key": "gpt-image-2.6-flare", "prompt": "Async sunset"},
         headers=h,
     )
     assert r.status_code == 201
