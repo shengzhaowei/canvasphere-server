@@ -131,42 +131,168 @@ _TOOL_NAMES = {t["tool_name"] for t in ASSET_TOOLS_CATALOG}
 _ffmpeg_semaphore = threading.Semaphore(1)
 
 
-def _try_ffmpeg_render(normalized: dict[str, Any], output_format: str) -> tuple[bytes, bool]:
-    """Render timeline via bounded ffmpeg (-threads N, semaphore) when ffmpeg binary is installed.
+def build_atempo_chain(speed: float) -> str:
+    """Decompose any speed in [0.25, 4.0] into valid chained FFmpeg atempo filters ([0.5, 2.0])."""
+    rem = float(speed)
+    parts: list[str] = []
+    while rem < 0.5:
+        parts.append("atempo=0.5")
+        rem /= 0.5
+    while rem > 2.0:
+        parts.append("atempo=2.0")
+        rem /= 2.0
+    parts.append(f"atempo={rem:.4f}")
+    return ",".join(parts)
 
-    Falls back safely to metadata-packaged placeholder bytes when ffmpeg is unavailable
-    (e.g. local Windows dev/CI without ffmpeg).
-    """
-    ffmpeg_bin = shutil.which("ffmpeg")
-    if not ffmpeg_bin:
-        return _FALLBACK_MP4 + json.dumps(normalized, ensure_ascii=False).encode("utf-8"), False
 
+def build_ffmpeg_timeline_command(
+    ffmpeg_bin: str,
+    normalized: dict[str, Any],
+    clip_sources: list[Optional[Path]],
+    output_path: Path,
+    output_format: str,
+    threads: int = 2,
+) -> tuple[list[str], str]:
+    """Construct a real multi-track FFmpeg filter_complex command for TimelineDraft."""
+    clips = normalized["clips"]
+    cmd: list[str] = [ffmpeg_bin, "-y", "-threads", str(max(1, threads))]
+    filter_parts: list[str] = []
+    video_labels: list[str] = []
+    audio_labels: list[str] = []
+
+    for idx, (clip, src_path) in enumerate(zip(clips, clip_sources)):
+        track = clip["track"]
+        dur_sec = max(0.1, clip["duration_ms"] / 1000.0)
+        eff_sec = max(0.1, clip["effective_duration_ms"] / 1000.0)
+        speed = float(clip["speed"])
+        fade_in = clip["fade_in_ms"] / 1000.0
+        fade_out = clip["fade_out_ms"] / 1000.0
+
+        if src_path is not None and src_path.is_file():
+            cmd.extend(["-i", str(src_path)])
+        elif track == "video":
+            cmd.extend(["-f", "lavfi", "-i", f"color=c=black:s=640x360:d={dur_sec:.3f}"])
+        else:
+            cmd.extend(["-f", "lavfi", "-i", f"anullsrc=r=44100:cl=stereo:d={dur_sec:.3f}"])
+
+        if track == "video":
+            v_chain = [
+                f"trim=duration={dur_sec:.3f}",
+                f"setpts=(PTS-STARTPTS)/{speed:.4f}",
+                "scale=1280:720:force_original_aspect_ratio=decrease",
+                "pad=1280:720:(ow-iw)/2:(oh-ih)/2",
+            ]
+            if fade_in > 0:
+                v_chain.append(f"fade=t=in:st=0:d={fade_in:.3f}")
+            if fade_out > 0:
+                st_out = max(0.0, eff_sec - fade_out)
+                v_chain.append(f"fade=t=out:st={st_out:.3f}:d={fade_out:.3f}")
+            lbl = f"v{idx}"
+            filter_parts.append(f"[{idx}:v]{','.join(v_chain)}[{lbl}]")
+            video_labels.append(f"[{lbl}]")
+        else:
+            a_chain = [f"atrim=duration={dur_sec:.3f}", "asetpts=PTS-STARTPTS"]
+            if abs(speed - 1.0) > 1e-4:
+                if clip["preserve_pitch"]:
+                    a_chain.append(build_atempo_chain(speed))
+                else:
+                    a_chain.append(f"asetrate=44100*{speed:.4f},aresample=44100")
+            if clip["mute"]:
+                a_chain.append("volume=0")
+            elif abs(float(clip["gain_db"])) > 1e-4:
+                a_chain.append(f"volume={float(clip['gain_db']):.2f}dB")
+            if fade_in > 0:
+                a_chain.append(f"afade=t=in:st=0:d={fade_in:.3f}")
+            if fade_out > 0:
+                st_out = max(0.0, eff_sec - fade_out)
+                a_chain.append(f"afade=t=out:st={st_out:.3f}:d={fade_out:.3f}")
+            if clip["start_ms"] > 0:
+                a_chain.append(f"adelay={clip['start_ms']}|{clip['start_ms']}")
+            lbl = f"a{idx}"
+            filter_parts.append(f"[{idx}:a]{','.join(a_chain)}[{lbl}]")
+            audio_labels.append(f"[{lbl}]")
+
+    map_args: list[str] = []
+    if video_labels and output_format in ("mp4", "mov"):
+        if len(video_labels) == 1:
+            filter_parts.append(f"{video_labels[0]}null[vout]")
+        else:
+            filter_parts.append(f"{''.join(video_labels)}concat=n={len(video_labels)}:v=1:a=0[vout]")
+        map_args.extend(["-map", "[vout]"])
+
+    if audio_labels:
+        if len(audio_labels) == 1:
+            filter_parts.append(f"{audio_labels[0]}anull[aout]")
+        else:
+            filter_parts.append(f"{''.join(audio_labels)}amix=inputs={len(audio_labels)}:duration=longest:normalize=0[aout]")
+        map_args.extend(["-map", "[aout]"])
+
+    filter_complex = ";".join(filter_parts)
+    if filter_complex:
+        cmd.extend(["-filter_complex", filter_complex])
+    cmd.extend(map_args)
+    if output_format in ("mp4", "mov"):
+        cmd.extend(["-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p"])
+    cmd.append(str(output_path))
+    return cmd, filter_complex
+
+
+def _resolve_clip_local_path(db: Session, source_object_id: str) -> Optional[Path]:
+    obj = db.get(CanvasObject, source_object_id)
+    if obj is None or not isinstance(obj.asset_json, dict):
+        return None
+    primary = obj.asset_json.get("primary")
+    storage_id = primary.get("storage_id") if isinstance(primary, dict) else None
+    if not storage_id:
+        return None
+    sto = db.get(StorageObject, storage_id)
+    if sto is None or sto.status != "uploaded" or get_settings().effective_storage_backend != "local":
+        return None
+    path = storage._local_path_for(sto.object_key)
+    # Only pass real media files (> 256 bytes) to ffmpeg; tiny mock headers use synthetic lavfi inputs
+    if path.is_file() and path.stat().st_size > 256:
+        return path
+    return None
+
+
+def _try_ffmpeg_render(
+    db: Session,
+    normalized: dict[str, Any],
+    output_format: str,
+) -> tuple[bytes, bool, str]:
+    """Render multi-track TimelineDraft via bounded ffmpeg (-threads N, semaphore)."""
+    clip_sources = [_resolve_clip_local_path(db, c["source_object_id"]) for c in normalized["clips"]]
     settings = get_settings()
-    dur_sec = max(0.2, min(60.0, normalized["total_duration_ms"] / 1000.0))
-    threads = str(max(1, settings.ffmpeg_threads))
+    ffmpeg_bin = shutil.which("ffmpeg")
+    _preview_cmd, filter_complex = build_ffmpeg_timeline_command(
+        ffmpeg_bin or "ffmpeg",
+        normalized,
+        clip_sources,
+        Path(f"export.{output_format}"),
+        output_format,
+        threads=settings.ffmpeg_threads,
+    )
+    if not ffmpeg_bin:
+        return _FALLBACK_MP4 + json.dumps(normalized, ensure_ascii=False).encode("utf-8"), False, filter_complex
+
     with _ffmpeg_semaphore:
         with tempfile.TemporaryDirectory() as tmpdir:
             out_path = Path(tmpdir) / f"export.{output_format}"
-            if output_format in ("mp4", "mov"):
-                cmd = [
-                    ffmpeg_bin, "-y", "-threads", threads,
-                    "-f", "lavfi", "-i", f"color=c=black:s=320x180:d={dur_sec}",
-                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
-                    str(out_path),
-                ]
-            else:
-                cmd = [
-                    ffmpeg_bin, "-y", "-threads", threads,
-                    "-f", "lavfi", "-i", f"anullsrc=r=44100:cl=stereo:d={dur_sec}",
-                    str(out_path),
-                ]
+            cmd, filter_complex = build_ffmpeg_timeline_command(
+                ffmpeg_bin,
+                normalized,
+                clip_sources,
+                out_path,
+                output_format,
+                threads=settings.ffmpeg_threads,
+            )
             try:
-                proc = subprocess.run(cmd, capture_output=True, timeout=60)
+                proc = subprocess.run(cmd, capture_output=True, timeout=120)
                 if proc.returncode == 0 and out_path.is_file() and out_path.stat().st_size > 0:
-                    return out_path.read_bytes(), True
+                    return out_path.read_bytes(), True, filter_complex
             except Exception:
                 pass
-    return _FALLBACK_MP4 + json.dumps(normalized, ensure_ascii=False).encode("utf-8"), False
+    return _FALLBACK_MP4 + json.dumps(normalized, ensure_ascii=False).encode("utf-8"), False, filter_complex
 
 
 def _save_workspace_bytes(
@@ -426,7 +552,7 @@ def run_asset_tool(
 
         mime = "video/mp4" if fmt in ("mp4", "mov") else ("audio/wav" if fmt == "wav" else "audio/mpeg")
         node_type = "video" if fmt in ("mp4", "mov") else "audio"
-        export_bytes, used_ffmpeg = _try_ffmpeg_render(normalized, fmt)
+        export_bytes, used_ffmpeg, filter_complex = _try_ffmpeg_render(db, normalized, fmt)
         dur_sec = round(normalized["total_duration_ms"] / 1000.0, 3)
         saved = _save_workspace_bytes(
             db, project, user_id, f"timeline_export.{fmt}", mime, export_bytes, duration_seconds=dur_sec
@@ -442,7 +568,7 @@ def run_asset_tool(
             w=420.0,
             h=240.0,
             media_type=node_type,
-            content_json={"timeline_draft": normalized, "rendered_with_ffmpeg": used_ffmpeg},
+            content_json={"timeline_draft": normalized, "rendered_with_ffmpeg": used_ffmpeg, "filter_complex": filter_complex},
             asset_json={"primary": saved, "artifacts": [saved], "source_tool": "timeline.export"},
             version=1,
             created_at=now,
@@ -455,6 +581,7 @@ def run_asset_tool(
             "artifact": saved,
             "timeline": normalized,
             "rendered_with_ffmpeg": used_ffmpeg,
+            "filter_complex": filter_complex,
         }
 
     elif tool_name == "media.probe":

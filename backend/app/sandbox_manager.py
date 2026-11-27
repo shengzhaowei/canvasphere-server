@@ -149,6 +149,8 @@ def reap_idle_sandboxes(db: Session, project_id: Optional[str] = None) -> list[s
         cfg = get_or_create_sandbox_config(db, sess.project_id)
         idle_limit = timedelta(minutes=int(cfg.idle_keep_minutes))
         if now - _as_utc(sess.last_active_at) >= idle_limit:
+            if sess.container_id:
+                sandbox.destroy_container(sess.container_id)
             sess.status = "stopped"
             sess.stopped_at = now
             db.add(sess)
@@ -168,6 +170,8 @@ def stop_project_sandbox(db: Session, project_id: str) -> list[str]:
     ).all()
     stopped: list[str] = []
     for sess in sessions:
+        if sess.container_id:
+            sandbox.destroy_container(sess.container_id)
         sess.status = "stopped"
         sess.stopped_at = now
         db.add(sess)
@@ -298,7 +302,24 @@ def execute_in_project_sandbox(
         db.flush()
 
     t0 = time.monotonic()
-    exec_result = sandbox.run_code(code, timeout=timeout)
+    # Prefer keepalive docker exec container with project workspace mounted when available
+    if not sess.container_id:
+        ws_dir = str((get_settings().local_storage_dir / "workspace" / project.workspace_id).resolve())
+        try:
+            from pathlib import Path
+            Path(ws_dir).mkdir(parents=True, exist_ok=True)
+        except Exception:
+            ws_dir = None
+        cid = sandbox.ensure_keepalive_container(sess.id, workspace_dir=ws_dir)
+        if cid:
+            sess.container_id = cid
+            db.add(sess)
+            db.flush()
+
+    if sess.container_id:
+        exec_result = sandbox.exec_in_container(sess.container_id, code, timeout=timeout)
+    else:
+        exec_result = sandbox.run_code(code, timeout=timeout)
     measured = max(0.1, time.monotonic() - t0)
     run_duration = float(simulated_duration_seconds) if simulated_duration_seconds is not None else round(measured, 3)
 

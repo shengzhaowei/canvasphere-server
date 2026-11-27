@@ -1,4 +1,5 @@
-"""Pecan Studio 5-agent orchestrator, canvas DAG context, token compression & TaskRun fences.
+"""Pecan Studio 5-agent orchestrator, multi-turn ReAct tool-calling loop, canvas DAG context,
+LLM semantic compression, TaskRun generation fences & SSE streaming generator.
 
 5 Specialized Agents (aligned with ai.pecan.wang):
 - pecan     : Pecan (主控统筹：拆解任务树、委派专家、汇总交付)
@@ -10,17 +11,20 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import re
 import uuid
 from collections import deque
+from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Any, Optional
+from typing import Any, Generator, Optional
 
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import agents, permissions, skills, storage
+from app import agents, asset_tools, model_platform, permissions, sandbox_manager, skills, storage
 from app.config import get_settings
 from app.models import (
     AgentMessage,
@@ -34,6 +38,8 @@ from app.models import (
     utcnow,
 )
 from app.realtime import event_bus
+
+logger = logging.getLogger(__name__)
 
 STUDIO_AGENTS: dict[str, dict[str, Any]] = {
     "pecan": {
@@ -96,6 +102,110 @@ _AGENT_ALIASES = {
 
 _SKILL_MENTION_RE = re.compile(r"@([A-Za-z0-9_-]+)")
 
+# OpenAI-compatible JSON tool definitions bound to LLM in multi-turn ReAct mode
+STUDIO_TOOL_SCHEMAS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "read_canvas",
+            "description": "Read current objects and connectors on the active canvas.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_project_files",
+            "description": "List uploaded workspace files in the current project.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_node",
+            "description": "Create a text/document/media node on the canvas.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "type": {"type": "string", "default": "text"},
+                    "name": {"type": "string"},
+                    "text": {"type": "string"},
+                    "x": {"type": "number", "default": 80},
+                    "y": {"type": "number", "default": 80},
+                },
+                "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_node",
+            "description": "Update an existing canvas node's text.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "node_id": {"type": "string"},
+                    "text": {"type": "string"},
+                },
+                "required": ["node_id", "text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_image",
+            "description": "Generate an image on the canvas via the multimodal model platform.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "model_key": {"type": "string", "default": "gpt-image-2.6-flare-ox"},
+                    "prompt": {"type": "string"},
+                },
+                "required": ["prompt"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_video",
+            "description": "Generate a video on the canvas via the multimodal model platform.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "model_key": {"type": "string", "default": "seedance-2.5-pro-zh-tt-720"},
+                    "prompt": {"type": "string"},
+                    "duration_seconds": {"type": "integer", "default": 5},
+                },
+                "required": ["prompt"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_code",
+            "description": "Execute Python code in the project sandbox.",
+            "parameters": {
+                "type": "object",
+                "properties": {"code": {"type": "string"}},
+                "required": ["code"],
+            },
+        },
+    },
+]
+
+
+@dataclass
+class ModelTurnResult:
+    content: str = ""
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)  # [{"id", "name", "args"}]
+    mock: bool = True
+    usage: Optional[dict[str, Any]] = None
+
 
 def normalize_agent_id(raw: Optional[str]) -> Optional[str]:
     if not raw:
@@ -104,7 +214,6 @@ def normalize_agent_id(raw: Optional[str]) -> Optional[str]:
 
 
 def estimate_tokens(text: str) -> int:
-    """Deterministic lightweight token estimator (works identically offline & in CI)."""
     if not text:
         return 0
     return max(1, (len(text) + 2) // 3)
@@ -141,7 +250,6 @@ def gather_canvas_graph_context(
     max_depth: int = 4,
     max_nodes: int = 30,
 ) -> dict[str, Any]:
-    """Traverse incoming connector edges from seed_object_ids to gather upstream context."""
     if not seed_object_ids:
         return {"nodes": [], "edges": [], "prompt_context": ""}
 
@@ -187,7 +295,6 @@ def gather_canvas_graph_context(
                 if edge.from_object_id and edge.from_object_id in by_id and edge.from_object_id not in visited:
                     queue.append((edge.from_object_id, depth + 1))
 
-    # Present upstream nodes first (deepest -> seed) so prompt reads chronologically
     ordered_nodes.sort(key=lambda n: n["depth"], reverse=True)
     lines = []
     for n in ordered_nodes:
@@ -198,14 +305,46 @@ def gather_canvas_graph_context(
     return {"nodes": ordered_nodes, "edges": edges, "prompt_context": prompt_context}
 
 
-# --- Token-Aware Context Compression -> Private Runtime Storage -----------
+# --- LLM Semantic Summarization + Token-Aware Context Compression ---------
+def summarize_messages_for_compression(
+    previous_summary: str,
+    messages: list[AgentMessage],
+) -> tuple[str, bool]:
+    """Generate semantic memory summary via LLM when LLM_API_KEY is set, else deterministic fallback."""
+    transcript_lines = [f"[{m.role}/{m.agent_name or 'user'}] {m.content[:240]}" for m in messages]
+    raw_block = "\n".join(transcript_lines)
+    if agents.is_live_mode():
+        try:
+            from langchain_openai import ChatOpenAI
+            llm = ChatOpenAI(
+                base_url=os.environ.get("LLM_BASE_URL") or None,
+                api_key=os.environ["LLM_API_KEY"],
+                model=os.environ.get("LLM_MODEL", "gpt-4o-mini"),
+                timeout=20,
+            )
+            prompt = (
+                "请将以下多智能体画布创作对话历史压缩为简洁的记忆摘要（不超过 300 字），"
+                "务必保留关键角色设定、视觉风格、已生成资产与待确认决策：\n"
+                f"已有摘要：{previous_summary or '（无）'}\n\n新增对话：\n{raw_block}"
+            )
+            msg = llm.invoke(prompt)
+            summary = str(getattr(msg, "content", "") or "").strip()
+            if summary:
+                return summary[:4000], True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("LLM context summarization failed (%s); falling back to deterministic summary", exc)
+
+    chunk = " | ".join(f"[{m.role}/{m.agent_name or 'user'}] {m.content[:120]}" for m in messages)
+    merged = f"{previous_summary}\n{chunk}".strip() if previous_summary else chunk
+    return merged[-4000:], False
+
+
 def compress_session_context_if_needed(
     db: Session,
     session: AgentSession,
     project: Project,
     user_id: Optional[str],
 ) -> bool:
-    """When uncompressed tokens exceed threshold, archive older messages into private_runtime."""
     threshold = get_settings().context_compress_threshold_tokens
     msgs = db.scalars(
         select(AgentMessage)
@@ -218,7 +357,6 @@ def compress_session_context_if_needed(
         db.add(session)
         return False
 
-    # Keep the 2 most recent messages hot; compress everything older
     to_compress = msgs[:-2]
     kept = msgs[-2:]
 
@@ -273,11 +411,8 @@ def compress_session_context_if_needed(
     db.add(sto)
     db.flush()
 
-    summary_lines = [f"[{m.role}/{m.agent_name or 'user'}] {m.content[:120]}" for m in to_compress]
-    new_chunk = " | ".join(summary_lines)
-    session.context_summary = (
-        f"{session.context_summary}\n{new_chunk}".strip() if session.context_summary else new_chunk
-    )[-4000:]
+    summary_text, _used_llm = summarize_messages_for_compression(session.context_summary, to_compress)
+    session.context_summary = summary_text
     session.summary_storage_id = sto.id
     session.compressed_count = int(session.compressed_count) + 1
     session.token_count = sum(int(m.token_estimate) for m in kept) + estimate_tokens(session.context_summary)
@@ -333,7 +468,6 @@ def build_recovery_bundle(db: Session, run: TaskRun) -> dict[str, Any]:
 
 
 def recover_stale_runs(db: Session, project_id: str, new_owner: str = "recovery-worker") -> list[dict[str, Any]]:
-    """Scan in-flight runs whose lease has expired, bump generation_fence, and flag for review."""
     now = utcnow()
     runs = db.scalars(
         select(TaskRun).where(
@@ -357,9 +491,227 @@ def recover_stale_runs(db: Session, project_id: str, new_owner: str = "recovery-
     return recovered
 
 
+# --- Multi-Turn ReAct Tool-Calling Engine ---------------------------------
+def invoke_tool_calling_model(
+    *,
+    agent_id: str,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+) -> ModelTurnResult:
+    """Invoke ChatOpenAI.bind_tools(tools) when LLM_API_KEY is set; pluggable hook for tests."""
+    if not agents.is_live_mode():
+        # Offline/CI default: return no extra tool calls so standard specialist pipeline executes
+        return ModelTurnResult(content="", tool_calls=[], mock=True)
+    try:
+        from langchain_openai import ChatOpenAI
+        llm = ChatOpenAI(
+            base_url=os.environ.get("LLM_BASE_URL") or None,
+            api_key=os.environ["LLM_API_KEY"],
+            model=os.environ.get("LLM_MODEL", "gpt-4o-mini"),
+            timeout=30,
+        ).bind_tools(tools)
+        spec = STUDIO_AGENTS.get(agent_id, STUDIO_AGENTS["pecan"])
+        sys_msg = {
+            "role": "system",
+            "content": (
+                f"你是 Pecan Studio 的「{spec['name']}」（{spec['role']}）。"
+                f"{spec['description']} 你可以按需调用画布工具，最后给出简洁清晰的中文回复。"
+            ),
+        }
+        msg = llm.invoke([sys_msg, *messages])
+        raw_tcs = getattr(msg, "tool_calls", None) or []
+        norm_tcs = [
+            {
+                "id": tc.get("id") or f"call_{uuid.uuid4().hex[:8]}",
+                "name": tc.get("name"),
+                "args": tc.get("args") or {},
+            }
+            for tc in raw_tcs
+            if isinstance(tc, dict) and tc.get("name")
+        ]
+        meta = getattr(msg, "response_metadata", {}) or {}
+        usage = meta.get("token_usage") if isinstance(meta.get("token_usage"), dict) else None
+        return ModelTurnResult(
+            content=str(getattr(msg, "content", "") or "").strip(),
+            tool_calls=norm_tcs,
+            mock=False,
+            usage=usage,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("bind_tools LLM call failed (%s); degrading cleanly", exc)
+        return ModelTurnResult(content="", tool_calls=[], mock=True)
+
+
+def _execute_studio_tool(
+    db: Session,
+    *,
+    project: Project,
+    canvas: Canvas,
+    user_id: Optional[str],
+    tool_name: str,
+    args: dict[str, Any],
+) -> dict[str, Any]:
+    """Execute one validated Studio tool against real DB/storage/model_platform/sandbox."""
+    now = utcnow()
+    if tool_name == "read_canvas":
+        objs = db.scalars(
+            select(CanvasObject).where(
+                CanvasObject.project_id == project.id,
+                CanvasObject.canvas_id == canvas.id,
+                CanvasObject.deleted_at.is_(None),
+            )
+        ).all()
+        return {
+            "count": len(objs),
+            "objects": [{"id": o.id, "type": o.type, "name": o.name, "text": o.text[:200]} for o in objs],
+        }
+    if tool_name == "list_project_files":
+        files = db.scalars(
+            select(StorageObject).where(
+                StorageObject.project_id == project.id,
+                StorageObject.space == "workspace",
+                StorageObject.status == "uploaded",
+            )
+        ).all()
+        return {"files": [{"storage_id": f.id, "filename": f.filename, "size_bytes": f.size_bytes} for f in files]}
+    if tool_name == "add_node":
+        obj = CanvasObject(
+            id=new_prefixed_id("obj"),
+            project_id=project.id,
+            canvas_id=canvas.id,
+            type=str(args.get("type") or "text"),
+            name=str(args.get("name") or "Agent 节点")[:128],
+            x=float(args.get("x", 80)),
+            y=float(args.get("y", 80)),
+            w=float(args.get("w", 340)),
+            h=float(args.get("h", 180)),
+            text=str(args.get("text") or ""),
+            version=1,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(obj)
+        db.flush()
+        event_bus.publish(project.id, canvas.id, "object.created", {"object_id": obj.id, "type": obj.type}, actor_id=user_id)
+        return {"object_id": obj.id, "type": obj.type, "name": obj.name}
+    if tool_name == "update_node":
+        node = db.get(CanvasObject, args.get("node_id", ""))
+        if node is None or node.canvas_id != canvas.id or node.deleted_at is not None:
+            return {"error": f"node not found: {args.get('node_id')}"}
+        node.text = str(args.get("text") or "")
+        node.version = int(node.version) + 1
+        node.updated_at = now
+        db.add(node)
+        db.flush()
+        return {"object_id": node.id, "version": int(node.version)}
+    if tool_name == "generate_image":
+        res = model_platform.run_generation_pipeline(
+            db,
+            project=project,
+            canvas=canvas,
+            user_id=user_id,
+            modality="image",
+            model_key=str(args.get("model_key") or "gpt-image-2.6-flare-ox"),
+            mode="imagine",
+            prompt=str(args.get("prompt") or ""),
+            params={"count": 1},
+        )
+        return {"job_id": res["id"], "status": res["status"], "target_object_id": res.get("target_object_id")}
+    if tool_name == "generate_video":
+        res = model_platform.run_generation_pipeline(
+            db,
+            project=project,
+            canvas=canvas,
+            user_id=user_id,
+            modality="video",
+            model_key=str(args.get("model_key") or "seedance-2.5-pro-zh-tt-720"),
+            mode="t2v",
+            prompt=str(args.get("prompt") or ""),
+            params={"resolution": "720P", "duration_seconds": int(args.get("duration_seconds", 5))},
+        )
+        return {"job_id": res["id"], "status": res["status"], "target_object_id": res.get("target_object_id")}
+    if tool_name == "run_code":
+        res = sandbox_manager.execute_in_project_sandbox(
+            db,
+            project=project,
+            user_id=user_id,
+            code=str(args.get("code") or "print('ok')"),
+        )
+        return {"session_id": res["session_id"], "stdout": res["execution"].get("stdout"), "exit_code": res["execution"].get("exit_code")}
+    return {"error": f"unsupported tool: {tool_name}"}
+
+
+def run_react_tool_loop(
+    db: Session,
+    *,
+    run: TaskRun,
+    session: AgentSession,
+    project: Project,
+    canvas: Canvas,
+    messages: list[dict[str, Any]],
+    tool_trace: list[dict[str, Any]],
+    max_turns: int = 6,
+    preapproved_call: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Multi-turn bind_tools ReAct loop with mid-loop tiered approval suspension & resume."""
+    working_msgs = list(messages)
+    trace = list(tool_trace)
+
+    # If resuming from an approved tool call, execute that tool first and feed result back to LLM
+    if preapproved_call is not None:
+        t_name = preapproved_call["name"]
+        t_args = preapproved_call.get("args") or {}
+        t_out = _execute_studio_tool(
+            db, project=project, canvas=canvas, user_id=run.user_id, tool_name=t_name, args=t_args
+        )
+        trace.append({"id": preapproved_call.get("id"), "name": t_name, "args": t_args, "output": t_out, "approved": True})
+        working_msgs.append({"role": "tool", "name": t_name, "content": json.dumps(t_out, ensure_ascii=False)})
+
+    for _turn in range(max_turns):
+        turn_res = invoke_tool_calling_model(
+            agent_id=run.primary_agent,
+            messages=working_msgs,
+            tools=STUDIO_TOOL_SCHEMAS,
+        )
+        if not turn_res.tool_calls:
+            return {
+                "status": "completed",
+                "content": turn_res.content,
+                "mock": turn_res.mock,
+                "usage": turn_res.usage,
+                "tool_trace": trace,
+                "messages": working_msgs,
+            }
+
+        for idx, tc in enumerate(turn_res.tool_calls):
+            t_name = tc["name"]
+            t_args = tc.get("args") or {}
+            if permissions.require_approval(t_name, project.id):
+                return {
+                    "status": "waiting_approval",
+                    "pending_call": tc,
+                    "remaining_calls": turn_res.tool_calls[idx + 1:],
+                    "tool_trace": trace,
+                    "messages": working_msgs,
+                }
+            t_out = _execute_studio_tool(
+                db, project=project, canvas=canvas, user_id=run.user_id, tool_name=t_name, args=t_args
+            )
+            trace.append({"id": tc.get("id"), "name": t_name, "args": t_args, "output": t_out, "approved": False})
+            working_msgs.append({"role": "tool", "name": t_name, "content": json.dumps(t_out, ensure_ascii=False)})
+
+    return {
+        "status": "completed",
+        "content": "已完成多轮工具协同执行。",
+        "mock": False,
+        "usage": None,
+        "tool_trace": trace,
+        "messages": working_msgs,
+    }
+
+
 # --- Multi-Agent Routing, Planning & Approval Execution -------------------
 def _plan_specialist_steps(prompt: str, agent_hint: Optional[str]) -> tuple[str, list[dict[str, Any]]]:
-    """Decompose prompt into a frozen task tree led by Pecan + specialist agent(s)."""
     hint = normalize_agent_id(agent_hint)
     if hint and hint != "pecan":
         spec = STUDIO_AGENTS[hint]
@@ -368,7 +720,6 @@ def _plan_specialist_steps(prompt: str, agent_hint: Optional[str]) -> tuple[str,
             {"step": 2, "agent": hint, "action": spec["role"], "tool": spec["default_tool"], "status": "pending"},
         ]
 
-    # Route using existing domain keywords mapped to 4 Pecan specialists
     domain = agents.route_agent(prompt)
     domain_to_agent = {"story": "orange", "visual": "xiaoa", "video": "blueberry", "audio": "yueyue"}
     specialist = domain_to_agent.get(domain, "orange")
@@ -421,6 +772,66 @@ def serialize_run(r: TaskRun) -> dict[str, Any]:
     }
 
 
+def _finalize_react_run(
+    db: Session,
+    run: TaskRun,
+    session: AgentSession,
+    *,
+    final_text: str,
+    mock: bool,
+    usage: Any,
+    tool_trace: list[dict[str, Any]],
+    created_object_id: Optional[str],
+    skill_names: list[str],
+) -> dict[str, Any]:
+    spec = STUDIO_AGENTS.get(run.primary_agent, STUDIO_AGENTS["orange"])
+    now = utcnow()
+    tree = dict(run.frozen_tree_json or {})
+    for st in tree.get("steps") or []:
+        st["status"] = "done"
+    run.frozen_tree_json = tree
+    run.pending_tool_json = None
+    run.status = "done"
+    run.result_json = {
+        "agent": run.primary_agent,
+        "agent_name": spec["name"],
+        "text": final_text,
+        "mock": mock,
+        "usage": usage,
+        "tool_trace": tool_trace,
+        "created_object_id": created_object_id,
+    }
+    run.completed_at = now
+    run.updated_at = now
+    run.recovery_bundle_json = build_recovery_bundle(db, run)
+    db.add(run)
+
+    assistant_msg = AgentMessage(
+        id=new_prefixed_id("msg"),
+        session_id=session.id,
+        role="assistant",
+        agent_name=run.primary_agent,
+        content=final_text,
+        skills_json=skill_names,
+        context_object_ids_json=[created_object_id] if created_object_id else [],
+        tool_calls_json=tool_trace,
+        token_estimate=estimate_tokens(final_text),
+        compressed=False,
+        created_at=now,
+    )
+    db.add(assistant_msg)
+    db.flush()
+
+    event_bus.publish(
+        run.project_id,
+        run.canvas_id or "",
+        "studio.run_completed",
+        {"run_id": run.id, "agent": run.primary_agent, "created_object_id": created_object_id},
+        actor_id=run.user_id,
+    )
+    return run.result_json
+
+
 def _materialize_run_output(
     db: Session,
     run: TaskRun,
@@ -451,50 +862,17 @@ def _materialize_run_output(
     )
     db.add(created_obj)
     db.flush()
-
-    tree = dict(run.frozen_tree_json or {})
-    for st in tree.get("steps") or []:
-        st["status"] = "done"
-    run.frozen_tree_json = tree
-    run.pending_tool_json = None
-    run.status = "done"
-    run.result_json = {
-        "agent": run.primary_agent,
-        "agent_name": spec["name"],
-        "text": res.get("result"),
-        "mock": bool(res.get("mock", True)),
-        "usage": res.get("usage"),
-        "created_object_id": created_obj.id,
-    }
-    run.completed_at = now
-    run.updated_at = now
-    run.recovery_bundle_json = build_recovery_bundle(db, run)
-    db.add(run)
-
-    assistant_msg = AgentMessage(
-        id=new_prefixed_id("msg"),
-        session_id=session.id,
-        role="assistant",
-        agent_name=run.primary_agent,
-        content=str(res.get("result") or ""),
-        skills_json=[s["name"] for s in skill_ctx],
-        context_object_ids_json=[created_obj.id],
-        tool_calls_json=[{"tool": spec["default_tool"], "object_id": created_obj.id}],
-        token_estimate=estimate_tokens(str(res.get("result") or "")),
-        compressed=False,
-        created_at=now,
+    return _finalize_react_run(
+        db,
+        run,
+        session,
+        final_text=str(res.get("result") or ""),
+        mock=bool(res.get("mock", True)),
+        usage=res.get("usage"),
+        tool_trace=[{"name": spec["default_tool"], "object_id": created_obj.id}],
+        created_object_id=created_obj.id,
+        skill_names=[s["name"] for s in skill_ctx],
     )
-    db.add(assistant_msg)
-    db.flush()
-
-    event_bus.publish(
-        run.project_id,
-        run.canvas_id or "",
-        "studio.run_completed",
-        {"run_id": run.id, "agent": run.primary_agent, "created_object_id": created_obj.id},
-        actor_id=run.user_id,
-    )
-    return run.result_json
 
 
 def run_studio_chat(
@@ -510,6 +888,7 @@ def run_studio_chat(
     context_object_ids: Optional[list[str]] = None,
     request_id: Optional[str] = None,
     worker_id: str = "studio-host-1",
+    enable_tool_loop: bool = False,
 ) -> dict[str, Any]:
     if not prompt or not prompt.strip():
         raise HTTPException(status_code=400, detail="prompt must not be empty")
@@ -524,7 +903,6 @@ def run_studio_chat(
             "run": serialize_run(existing_run),
         }
 
-    # Lazy session creation on first prompt
     if session_id:
         session = db.get(AgentSession, session_id)
         if session is None or session.project_id != project.id:
@@ -568,7 +946,6 @@ def run_studio_chat(
     specialist, steps = _plan_specialist_steps(prompt, agent_hint)
     spec = STUDIO_AGENTS[specialist]
     tool_name = spec["default_tool"]
-    needs_approval = permissions.require_approval(tool_name, project.id)
 
     effective_prompt = prompt.strip()
     if session.context_summary:
@@ -604,6 +981,75 @@ def run_studio_chat(
     db.flush()
     acquire_run_lease(db, run, worker_id)
 
+    # Multi-turn ReAct tool-calling loop when enabled or live mode explicitly invokes tools
+    if enable_tool_loop:
+        loop_res = run_react_tool_loop(
+            db,
+            run=run,
+            session=session,
+            project=project,
+            canvas=canvas,
+            messages=[{"role": "user", "content": effective_prompt}],
+            tool_trace=[],
+        )
+        if loop_res["status"] == "waiting_approval":
+            pending_call = loop_res["pending_call"]
+            run.status = "waiting_approval"
+            run.pending_tool_json = {
+                "mode": "react_tool_call",
+                "tool": pending_call["name"],
+                "tier": permissions.tier_of(pending_call["name"], project.id),
+                "agent": specialist,
+                "pending_call": pending_call,
+                "messages": loop_res["messages"],
+                "tool_trace": loop_res["tool_trace"],
+                "skills": skill_names,
+            }
+            run.recovery_bundle_json = build_recovery_bundle(db, run)
+            db.add(run)
+            db.commit()
+            event_bus.publish(
+                project.id,
+                canvas.id,
+                "studio.approval_required",
+                {"run_id": run.id, "tool": pending_call["name"], "agent": specialist},
+                actor_id=user_id,
+            )
+            return {
+                "idempotent_replay": False,
+                "context_compressed": did_compress,
+                "graph_context": graph_ctx,
+                "session": serialize_session(session),
+                "run": serialize_run(run),
+            }
+        if loop_res["tool_trace"] or loop_res["content"]:
+            created_oid = None
+            for tr in reversed(loop_res["tool_trace"]):
+                out = tr.get("output") or {}
+                if out.get("object_id") or out.get("target_object_id"):
+                    created_oid = out.get("object_id") or out.get("target_object_id")
+                    break
+            _finalize_react_run(
+                db,
+                run,
+                session,
+                final_text=loop_res["content"] or "已完成工具协同处理。",
+                mock=loop_res["mock"],
+                usage=loop_res["usage"],
+                tool_trace=loop_res["tool_trace"],
+                created_object_id=created_oid,
+                skill_names=skill_names,
+            )
+            db.commit()
+            return {
+                "idempotent_replay": False,
+                "context_compressed": did_compress,
+                "graph_context": graph_ctx,
+                "session": serialize_session(session),
+                "run": serialize_run(run),
+            }
+
+    needs_approval = permissions.require_approval(tool_name, project.id)
     if needs_approval:
         run.status = "waiting_approval"
         run.pending_tool_json = {
@@ -636,6 +1082,40 @@ def run_studio_chat(
     }
 
 
+def stream_studio_chat_events(chat_result: dict[str, Any]) -> Generator[str, None, None]:
+    """Emit structured SSE frames (session, graph_context, plan, tool cards, token chunks, done)."""
+    def _sse(event: str, data: dict[str, Any]) -> str:
+        return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+    yield _sse("session", {
+        "session": chat_result.get("session"),
+        "context_compressed": bool(chat_result.get("context_compressed", False)),
+    })
+    if chat_result.get("graph_context"):
+        yield _sse("graph_context", chat_result["graph_context"])
+
+    run = chat_result["run"]
+    yield _sse("plan", {"run_id": run["id"], "primary_agent": run["primary_agent"], "frozen_tree": run["frozen_tree"]})
+
+    res = run.get("result") or {}
+    for tc in res.get("tool_trace") or []:
+        yield _sse("tool_result", tc)
+
+    if run["status"] == "waiting_approval":
+        yield _sse("approval_required", {
+            "run_id": run["id"],
+            "pending_tool": run.get("pending_tool"),
+            "generation_fence": run["generation_fence"],
+        })
+    else:
+        text = str(res.get("text") or "")
+        chunk_size = 24
+        for i in range(0, len(text), chunk_size):
+            yield _sse("token", {"delta": text[i: i + chunk_size]})
+
+    yield _sse("done", {"run": run, "session": chat_result.get("session")})
+
+
 def approve_task_run(
     db: Session,
     run: TaskRun,
@@ -655,6 +1135,59 @@ def approve_task_run(
     session = db.get(AgentSession, run.session_id)
     assert session is not None
     acquire_run_lease(db, run, run.lease_owner or "approval-resumer")
+
+    if pending.get("mode") == "react_tool_call":
+        project = db.get(Project, run.project_id)
+        canvas = db.get(Canvas, run.canvas_id)
+        assert project is not None and canvas is not None
+        loop_res = run_react_tool_loop(
+            db,
+            run=run,
+            session=session,
+            project=project,
+            canvas=canvas,
+            messages=pending.get("messages") or [],
+            tool_trace=pending.get("tool_trace") or [],
+            preapproved_call=pending.get("pending_call"),
+        )
+        if loop_res["status"] == "waiting_approval":
+            next_call = loop_res["pending_call"]
+            run.status = "waiting_approval"
+            run.pending_tool_json = {
+                "mode": "react_tool_call",
+                "tool": next_call["name"],
+                "tier": permissions.tier_of(next_call["name"], project.id),
+                "agent": run.primary_agent,
+                "pending_call": next_call,
+                "messages": loop_res["messages"],
+                "tool_trace": loop_res["tool_trace"],
+                "skills": pending.get("skills") or [],
+            }
+            run.recovery_bundle_json = build_recovery_bundle(db, run)
+            db.add(run)
+            db.commit()
+            return serialize_run(run)
+
+        created_oid = None
+        for tr in reversed(loop_res["tool_trace"]):
+            out = tr.get("output") or {}
+            if out.get("object_id") or out.get("target_object_id"):
+                created_oid = out.get("object_id") or out.get("target_object_id")
+                break
+        _finalize_react_run(
+            db,
+            run,
+            session,
+            final_text=loop_res["content"] or "审批通过，已完成工具执行。",
+            mock=loop_res["mock"],
+            usage=loop_res["usage"],
+            tool_trace=loop_res["tool_trace"],
+            created_object_id=created_oid,
+            skill_names=pending.get("skills") or [],
+        )
+        db.commit()
+        return serialize_run(run)
+
     _materialize_run_output(
         db,
         run,

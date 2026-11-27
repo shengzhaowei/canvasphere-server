@@ -97,9 +97,12 @@ services:
 
   yjs:
     build: ./yjs
+    env_file:
+      - .env
     environment:
       - HOST=0.0.0.0
       - PORT=1234
+      - YJS_REQUIRE_AUTH=${YJS_REQUIRE_AUTH:-true}
     ports:
       - "1234:1234"
     deploy:

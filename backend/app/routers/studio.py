@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -28,6 +29,7 @@ class StudioChatRequest(BaseModel):
     skills: list[str] = Field(default_factory=list)
     context_object_ids: list[str] = Field(default_factory=list)
     request_id: Optional[str] = None
+    enable_tool_loop: bool = False
 
 
 class RunApproveRequest(BaseModel):
@@ -159,6 +161,49 @@ def studio_chat(
         explicit_skills=body.skills,
         context_object_ids=body.context_object_ids,
         request_id=body.request_id,
+        enable_tool_loop=body.enable_tool_loop,
+    )
+
+
+@router.post("/api/projects/{project_id}/canvases/{canvas_id}/studio/chat/stream")
+def studio_chat_stream(
+    project_id: str,
+    canvas_id: str,
+    body: StudioChatRequest,
+    request: Request,
+    x_role: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    user, role = auth.resolve_project_actor(project_id, request, db, x_role)
+    if not can_write(role):
+        raise HTTPException(status_code=403, detail="viewer cannot send studio chat prompts")
+    proj = db.get(Project, project_id)
+    assert proj is not None
+    canvas = db.get(Canvas, canvas_id)
+    if canvas is None or canvas.project_id != project_id:
+        raise HTTPException(status_code=404, detail=f"canvas not found: {canvas_id}")
+
+    chat_res = studio_agents.run_studio_chat(
+        db,
+        project=proj,
+        canvas=canvas,
+        user_id=user.id if user else None,
+        prompt=body.prompt,
+        session_id=body.session_id,
+        agent_hint=body.agent,
+        explicit_skills=body.skills,
+        context_object_ids=body.context_object_ids,
+        request_id=body.request_id,
+        enable_tool_loop=body.enable_tool_loop,
+    )
+    return StreamingResponse(
+        studio_agents.stream_studio_chat_events(chat_res),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 

@@ -32,6 +32,7 @@ from app import agents, auth, store  # noqa: E402
 from app.checkpoint import get_checkpointer  # noqa: E402
 from app.config import get_settings  # noqa: E402
 from app.db import db_kind, get_db, init_db, session_scope  # noqa: E402
+from app.observability import configure_logging, metrics_middleware, prometheus_response  # noqa: E402
 from app.permissions import (  # noqa: E402
     ALL_TOOLS, assert_permission, check_permission,
     get_policy, grant_tool, require_approval,
@@ -55,12 +56,14 @@ from app.routers.studio import router as studio_router  # noqa: E402
 from app.routers.webhooks import router as webhooks_router  # noqa: E402
 from app.skills import is_skill_enabled, list_skills, load_skill, set_skill_enabled  # noqa: E402
 
+configure_logging()
 init_db()
 with session_scope() as _seed_db:
     ensure_rate_cards_seeded(_seed_db)
 
 app = FastAPI(title="canvasphere backend")
 _settings = get_settings()
+app.middleware("http")(metrics_middleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=list(_settings.cors_origins),
@@ -267,6 +270,11 @@ def runtime_config() -> dict[str, Any]:
     return {
         "system_timezone": settings.system_timezone,
     }
+
+
+@app.get("/metrics")
+def metrics():
+    return prometheus_response()
 
 
 @app.get("/api/config")

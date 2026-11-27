@@ -86,3 +86,68 @@ def run_code(code: str, timeout: int = 30) -> dict[str, Any]:
         return run_e2b(code, timeout=timeout)
     logger.info("no E2B_API_KEY; falling back to local Docker sandbox")
     return run_local_docker(code, timeout=timeout)
+
+
+# --- Keepalive container reuse (docker run -d + docker exec + workspace mount)
+def ensure_keepalive_container(session_id: str, workspace_dir: str | None = None) -> str | None:
+    """Start a detached keepalive python:3.12-slim container with optional workspace mount.
+
+    Returns container_id (or container name) on success, or None if Docker is unavailable.
+    """
+    if shutil.which("docker") is None:
+        return None
+    from app.config import get_settings
+    s = get_settings()
+    cname = f"canvasphere-sbx-{session_id}"
+    cmd = [
+        "docker", "run", "-d", "--rm",
+        "--name", cname,
+        "--network", "none",
+        "--memory", s.sandbox_docker_memory,
+        "--cpus", s.sandbox_docker_cpus,
+        "--pids-limit", "128",
+    ]
+    if workspace_dir:
+        cmd.extend(["-v", f"{workspace_dir}:/workspace"])
+    cmd.extend(["python:3.12-slim", "sleep", "3600"])
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        if proc.returncode == 0 and proc.stdout.strip():
+            return proc.stdout.strip()[:64]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to start keepalive sandbox container %s: %s", cname, exc)
+    return None
+
+
+def exec_in_container(container_id: str, code: str, timeout: int = 30) -> dict[str, Any]:
+    """Execute Python code inside an existing keepalive container via `docker exec`."""
+    if shutil.which("docker") is None:
+        return {"sandbox": "unavailable", "stdout": "", "stderr": "", "exit_code": None, "error": "未安装 docker"}
+    try:
+        proc = subprocess.run(
+            ["docker", "exec", "-w", "/workspace", container_id, "python", "-c", code],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        return {
+            "sandbox": "local-docker-keepalive",
+            "container_id": container_id,
+            "stdout": proc.stdout,
+            "stderr": proc.stderr,
+            "exit_code": proc.returncode,
+            "error": None,
+        }
+    except subprocess.TimeoutExpired:
+        return {"sandbox": "local-docker-keepalive", "container_id": container_id, "stdout": "", "stderr": "", "exit_code": None, "error": f"timed out after {timeout}s"}
+    except Exception as exc:  # noqa: BLE001
+        return {"sandbox": "unavailable", "container_id": container_id, "stdout": "", "stderr": "", "exit_code": None, "error": f"docker exec 失败：{exc}"}
+
+
+def destroy_container(container_id: str | None) -> bool:
+    """Force-remove a keepalive sandbox container when stopped or reaped."""
+    if not container_id or shutil.which("docker") is None:
+        return False
+    try:
+        proc = subprocess.run(["docker", "rm", "-f", container_id], capture_output=True, text=True, timeout=10)
+        return proc.returncode == 0
+    except Exception:
+        return False
